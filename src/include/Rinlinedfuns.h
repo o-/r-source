@@ -75,40 +75,21 @@
 /* define inline-able functions */
 
 #ifdef INLINE_PROTECT
-extern int R_PPStackSize;
-extern int R_PPStackTop;
-extern SEXP* R_PPStack;
 
 INLINE_FUN SEXP protect(SEXP s)
 {
-    if (R_PPStackTop < R_PPStackSize)
-	R_PPStack[R_PPStackTop++] = s;
-    else R_signal_protect_error();
-    return s;
 }
 
 INLINE_FUN void unprotect(int l)
 {
-#ifdef PROTECT_PARANOID
-    if (R_PPStackTop >=  l)
-	R_PPStackTop -= l;
-    else R_signal_unprotect_error();
-#else
-    R_PPStackTop -= l;
-#endif
 }
 
 INLINE_FUN void R_ProtectWithIndex(SEXP s, PROTECT_INDEX *pi)
 {
-    protect(s);
-    *pi = R_PPStackTop - 1;
 }
 
 INLINE_FUN void R_Reprotect(SEXP s, PROTECT_INDEX i)
 {
-    if (i >= R_PPStackTop || i < 0)
-	R_signal_reprotect_error(i);
-    R_PPStack[i] = s;
 }
 #endif /* INLINE_PROTECT */
 

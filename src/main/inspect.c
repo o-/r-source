@@ -91,7 +91,6 @@ static void inspect_tree(int pre, SEXP v, int deep, int pvec) {
 	    v->sxpinfo.gcgen, v->sxpinfo.gccls);
 #endif
     if (OBJECT(v)) { a = 1; Rprintf("OBJ"); }
-    if (MARK(v)) { if (a) Rprintf(","); Rprintf("MARK"); a = 1; }
 #ifndef SWITCH_TO_REFCNT
     if (NAMED(v)) { if (a) Rprintf(","); Rprintf("NAM(%d)",NAMED(v)); a = 1; }
 #endif

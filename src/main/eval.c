@@ -487,9 +487,6 @@ SEXP do_Rprof(SEXP args)
 
 void attribute_hidden check_stack_balance(SEXP op, int save)
 {
-    if(save == R_PPStackTop) return;
-    REprintf("Warning: stack imbalance in '%s', %d then %d\n",
-	     PRIMNAME(op), save, R_PPStackTop);
 }
 
 
@@ -693,7 +690,7 @@ SEXP eval(SEXP e, SEXP rho)
 	    PrintValue(e);
 	}
 	if (TYPEOF(op) == SPECIALSXP) {
-	    int save = R_PPStackTop, flag = PRIMPRINT(op);
+	    int flag = PRIMPRINT(op);
 	    const void *vmax = vmaxget();
 	    PROTECT(e);
 	    R_Visible = flag != 1;
@@ -709,11 +706,10 @@ SEXP eval(SEXP e, SEXP rho)
 #endif
 	    if (flag < 2) R_Visible = flag != 1;
 	    UNPROTECT(1);
-	    check_stack_balance(op, save);
 	    vmaxset(vmax);
 	}
 	else if (TYPEOF(op) == BUILTINSXP) {
-	    int save = R_PPStackTop, flag = PRIMPRINT(op);
+	    int flag = PRIMPRINT(op);
 	    const void *vmax = vmaxget();
 	    RCNTXT cntxt;
 	    PROTECT(tmp = evalList(CDR(e), rho, e, 0));
@@ -739,7 +735,6 @@ SEXP eval(SEXP e, SEXP rho)
 #endif
 	    if (flag < 2) R_Visible = flag != 1;
 	    UNPROTECT(1);
-	    check_stack_balance(op, save);
 	    vmaxset(vmax);
 	}
 	else if (TYPEOF(op) == CLOSXP) {
@@ -5986,7 +5981,8 @@ static SEXP bcEval(SEXP body, SEXP rho, Rboolean useCache)
 	}
 	NEXT();
       }
-    OP(POP, 0): BCNPOP_IGNORE_VALUE(); NEXT();
+    OP(POP, 0):
+      BCNPOP_IGNORE_VALUE(); NEXT();
     OP(DUP, 0): BCNDUP(); NEXT();
     OP(PRINTVALUE, 0): PrintValue(BCNPOP()); NEXT();
     OP(STARTLOOPCNTXT, 2):
@@ -6625,7 +6621,8 @@ static SEXP bcEval(SEXP body, SEXP rho, Rboolean useCache)
     OP(ISNUMERIC, 0): DO_ISTEST(isNumericOnly);
     OP(VECSUBSET, 1): DO_VECSUBSET(rho, FALSE); NEXT();
     OP(MATSUBSET, 1): DO_MATSUBSET(rho, FALSE); NEXT();
-    OP(VECSUBASSIGN, 1): DO_VECSUBASSIGN(rho, FALSE); NEXT();
+    OP(VECSUBASSIGN, 1):
+      DO_VECSUBASSIGN(rho, FALSE); NEXT();
     OP(MATSUBASSIGN, 1): DO_MATSUBASSIGN(rho, FALSE); NEXT();
     OP(AND1ST, 2): {
 	int callidx = GETOP();
@@ -6910,7 +6907,8 @@ static SEXP bcEval(SEXP body, SEXP rho, Rboolean useCache)
     OP(STARTSUBASSIGN_N, 2): DO_START_ASSIGN_DISPATCH_N("[<-");
     OP(VECSUBSET2, 1): DO_VECSUBSET(rho, TRUE); NEXT();
     OP(MATSUBSET2, 1): DO_MATSUBSET(rho, TRUE); NEXT();
-    OP(VECSUBASSIGN2, 1): DO_VECSUBASSIGN(rho, TRUE); NEXT();
+    OP(VECSUBASSIGN2, 1):
+      DO_VECSUBASSIGN(rho, TRUE); NEXT();
     OP(MATSUBASSIGN2, 1): DO_MATSUBASSIGN(rho, TRUE); NEXT();
     OP(STARTSUBSET2_N, 2): DO_STARTDISPATCH_N("[[");
     OP(STARTSUBASSIGN2_N, 2): DO_START_ASSIGN_DISPATCH_N("[[<-");
