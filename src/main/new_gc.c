@@ -37,7 +37,7 @@
 #define MARK_GREY  1
 #define MARK_WHITE 0
 
-#define GCDEBUG
+// #define GCDEBUG
 #ifdef GCDEBUG
 #define CHECK(exp) if(!(exp)) asm("int3")
 #define ON_DEBUG(exp) exp
@@ -138,8 +138,8 @@ static void Hashtable_occ(Hashtable* ht) {
 #define NUM_BUCKETS 13
 static size_t BUCKET_SIZE[NUM_BUCKETS] = {32, 36, 40, 48, 56, 64, 80, 96, 128, 160, 192, 256, 320};
 
-static size_t NormalHeapLimit = 1024 * 1024;
-static size_t TotalHeapLimit = 100 * 1024 * 1024;
+static size_t NormalHeapLimit = 4 * 1024 * 1024;
+static size_t TotalHeapLimit = 10 * 1024 * 1024;
 
 static inline size_t roundUp(size_t bs, size_t cs) {
   size_t res = bs / cs;
@@ -163,9 +163,13 @@ typedef struct Page {
   CellInfo info[MAX_IDX];
   int bkt  : 8;
   int live : 1;
+  int busy : 1;
   struct Page* next;
   uintptr_t end;
   uintptr_t finger;
+  uintptr_t sweep_finger;
+  uintptr_t sweep_end;
+  size_t free;
   char data[];
 } Page;
 
@@ -230,7 +234,7 @@ Page* allocPage(size_t bkt) {
     Rf_errorcall(R_NilValue, "error alloc");
   memset(data, 0, PAGE_SIZE);
   Page* page = (Page*)data;
-  CHECK((uintptr_t)page->data % PAGE_IDX == 0);
+  // CHECK((uintptr_t)page->data % PAGE_IDX == 0);
   page->next = NULL;
   page->finger = (uintptr_t)page->data;
   page->end = (uintptr_t)page + PAGE_SIZE;
@@ -239,14 +243,18 @@ Page* allocPage(size_t bkt) {
   page->end -= tail;
   page->bkt = bkt;
   page->live = 0;
+  page->busy = 0;
+  page->free = available / BUCKET_SIZE[bkt];
+  page->sweep_finger = page->sweep_end = (uintptr_t)page->data;
   // printf("allocated a %d page %p from %p to %p\n", bkt, page, page->finger, page->end);
   verifyPage(page);
   return page;
 }
 
 typedef struct SizeBucket {
-  Page* pages;
   Page* cur;
+  Page* pages;
+  Page* next_to_sweep;
 } SizeBucket;
 
 struct {
@@ -264,6 +272,7 @@ static void new_gc_initHeap() {
     SizeBucket* bucket = &HEAP.sizeBucket[i];
     bucket->pages = NULL;
     bucket->cur = NULL;
+    bucket->next_to_sweep = NULL;
   }
   HEAP.bigObjects = NULL;
   HEAP.bigObjectSize = 0;
@@ -370,8 +379,44 @@ static inline void updateFreeOnAlloc(SizeBucket* bucket, size_t bucketSz, size_t
   HEAP.size.used += bucketSz;
 }
 
-static void* growAllocInBucket(size_t bkt, size_t sz) {
+static void* findPageToSweep(SizeBucket* bucket) {
+  Page* page = bucket->next_to_sweep;
+  while (page != NULL && (page->sweep_finger == page->sweep_end || page->busy)) {
+    CHECK(page->sweep_finger <= page->sweep_end);
+    page = page->next;
+  }
+  bucket->next_to_sweep = page == NULL ? NULL : page->next;
+  bucket->cur = page;
+}
+
+static void* slowAllocInBucket(size_t bkt, size_t sz) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
+
+  // Lazy sweeping
+  while (bucket->next_to_sweep != NULL && bucket->cur != NULL) {
+    Page* page = bucket->cur;
+    uintptr_t finger = page->sweep_finger;
+    while (finger < page->sweep_end) {
+      void* res = (void*)finger;
+      size_t i = ptr2idx(res);
+      CHECK(i < MAX_IDX);
+      finger += BUCKET_SIZE[bkt];
+      if (page->info[i].mark == MARK_WHITE) {
+        if (page->info[i].used == 0) {
+          page->info[i].used = 1;
+          page->free--;
+        }
+        memset(res, 0, BUCKET_SIZE[bkt]);
+        page->sweep_finger = finger;
+        return res;
+      } else {
+        page->info[i].mark = MARK_WHITE;
+      }
+    }
+    page->sweep_finger = page->sweep_end;
+    findPageToSweep(bucket);
+  }
+
   growBucket(bkt);
   Page* page = bucket->cur;
   void* res = (void*)page->finger;
@@ -399,11 +444,12 @@ static inline void* allocInBucket(size_t bkt, size_t sz) {
       CHECK(page->info[i].used == 0);
       page->info[i].used = 1;
       page->finger = next;
+      page->free--;
       updateFreeOnAlloc(bucket, BUCKET_SIZE[bkt], sz);
       return res;
     }
   }
-  return growAllocInBucket(bkt, sz);
+  return slowAllocInBucket(bkt, sz);
 }
 
 SEXP alloc(size_t sz) {
@@ -536,17 +582,48 @@ SEXP new_gc_allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocato
 }
 
 static void traceHeap();
-static void sweep();
+static void finish_sweep();
+static void lazy_sweep();
 static void traceStack();
 
 #define MS_SIZE 40000
 static SEXP MarkStack[MS_SIZE+2];
 static size_t MSpos = 0;
 
+static size_t gc_cnt = 0;
+static void heapStatistics() {
+  printf("HEAP statistics after gc %d : total limit %d, small limit %d, actual size %d+%d=%d, used %d+%d=%d\n",
+      gc_cnt,
+      TotalHeapLimit / 1024,
+      NormalHeapLimit / 1024,
+      HEAP.size.size / 1024,
+      HEAP.bigObjectSize / 1024,
+      HEAP.size.size+HEAP.bigObjectSize / 1024,
+      HEAP.size.used / 1024,
+      HEAP.bigObjectSize / 1024,
+      HEAP.size.used+HEAP.bigObjectSize / 1024);
+  for (size_t i = 0; i < NUM_BUCKETS; ++i) {
+    size_t used = 0;
+    size_t wasted = 0;
+    Page* p = HEAP.sizeBucket[i].pages;
+    while (p != NULL) {
+      used += p->end - (uintptr_t)p->data;
+      wasted += p->free * BUCKET_SIZE[i];
+      p = p->next;
+    }
+    printf(" Bucket %d (%d) : size %d, wasted %d   (%f)\n", i, BUCKET_SIZE[i],
+        used  / 1024,
+        wasted / 1024,
+        (float)wasted / (float)(used+wasted));
+  }
+}
+
 static void PROCESS_NODE(SEXP);
 void static doGc() {
   // printf(".\n");
   CHECK(HEAP.size.size = HEAP.size.used + HEAP.size.free);
+
+  finish_sweep();
 
   ptr2page(R_NilValue)->info[ptr2idx(R_NilValue)].mark = MARK_BLACK;
   PROCESS_NODE(R_NilValue);
@@ -554,28 +631,64 @@ void static doGc() {
   traceStack();
   traceHeap();
   CHECK(MSpos == 0);
-  sweep();
+  lazy_sweep();
 
-  if ((double)HEAP.size.size / (double)NormalHeapLimit > 1.1) {
-    NormalHeapLimit = (double)NormalHeapLimit * 1.2;
-    printf("Grow Heap to %d kb\n", NormalHeapLimit / 1024);
+  if ((double)HEAP.size.size / (double)NormalHeapLimit > 0.8) {
+    NormalHeapLimit = (double)NormalHeapLimit * 1.1;
+    // printf("Grow Heap to %d kb\n", NormalHeapLimit / 1024);
   }
-  if ((double)(HEAP.bigObjectSize + HEAP.size.size) / (double)TotalHeapLimit > 1.1) {
-    TotalHeapLimit = (double)TotalHeapLimit * 1.2;
-    printf("Grow Total Heap to %d kb\n", TotalHeapLimit / 1024);
+  if (NormalHeapLimit > TotalHeapLimit)
+    TotalHeapLimit = (double)NormalHeapLimit * 1.1;
+  if ((double)(HEAP.bigObjectSize + HEAP.size.size) / (double)TotalHeapLimit > 0.8) {
+    TotalHeapLimit = (double)TotalHeapLimit * 1.1;
+    // printf("Grow Total Heap to %d kb\n", TotalHeapLimit / 1024);
+  }
+
+  ++gc_cnt;
+  // if (gc_cnt % 10 == 0)
+  //   heapStatistics();
+}
+
+static void finish_sweep() {
+  for (size_t s = 0; s < NUM_BUCKETS; ++s) {
+    SizeBucket* bucket = &HEAP.sizeBucket[s];
+    Page* p = bucket->pages;
+    while (p != NULL) {
+      CHECK(p->sweep_finger <= p->sweep_end && p->sweep_end <= p->finger);
+      uintptr_t finger = p->sweep_finger;
+      while (finger < p->sweep_end) {
+        size_t i = ptr2idx((void*)finger);
+        CHECK(i < MAX_IDX);
+        if (p->info[i].mark == MARK_WHITE) {
+          if (p->info[i].used == 1) {
+            p->info[i].used = 0;
+            ON_DEBUG(memset((void*)finger, 0xde, BUCKET_SIZE[p->bkt]));
+            p->free++;
+          }
+        } else {
+          p->info[i].mark = MARK_WHITE;
+        }
+        finger += BUCKET_SIZE[p->bkt];
+      }
+      p->sweep_finger = p->sweep_end;
+      size_t nodes = (p->end - p->finger) / BUCKET_SIZE[p->bkt];
+      if ((double)p->free / (double)nodes < 0.1)
+        p->busy = 1;
+      else
+        p->busy = 0;
+      p = p->next;
+    }
   }
 }
 
-static void sweep() {
+static void lazy_sweep() {
   for (size_t s = 0; s < NUM_BUCKETS; ++s) {
     SizeBucket* bucket = &HEAP.sizeBucket[s];
     Page* p = bucket->pages;
     Page** prevptr = &bucket->pages;
+
     while (p != NULL) {
       if (p->live == 0) {
-        // for (size_t i = 0; i < MAX_IDX; ++i) {
-        //   CHECK(p->info[i].mark == MARK_WHITE);
-        // }
         HEAP.size.free -= p->end - p->finger;
         HEAP.size.used -= p->finger - (uintptr_t)p->data;
         HEAP.size.size -= p->end - (uintptr_t)p->data;
@@ -588,25 +701,15 @@ static void sweep() {
         ON_DEBUG(memset(del, 0xde, PAGE_SIZE));
         free(del);
       } else {
-        uintptr_t finger = (uintptr_t)p->data;
-        while (finger < p->end) {
-          size_t i = ptr2idx((void*)finger);
-          CHECK(i < MAX_IDX);
-          if (p->info[i].mark == MARK_WHITE) {
-            if (p->info[i].used == 1) {
-              p->info[i].used = 0;
-              ON_DEBUG(memset((void*)finger, 0xde, BUCKET_SIZE[p->bkt]));
-            }
-          } else {
-            p->info[i].mark = MARK_WHITE;
-          }
-          finger += BUCKET_SIZE[p->bkt];
-        }
         p->live = 0;
+        p->sweep_finger = (uintptr_t)p->data;
+        p->sweep_end = p->finger;
         prevptr = &p->next;
         p = p->next;
       }
     }
+
+    bucket->next_to_sweep = bucket->pages;
   }
   BigObject* o = HEAP.bigObjects;
   BigObject** prevptr = &HEAP.bigObjects;
@@ -690,15 +793,16 @@ static inline void PUSH_NODE(SEXP s) {
 }
 
 static inline void PROCESS_NODE(SEXP cur) {
-  if (HAS_GENUINE_ATTRIB(cur)) {
-    PUSH_NODE(ATTRIB(cur));
-  }
+  SEXP attrib = ATTRIB(cur);
 
   switch (cur->sxpinfo.type) {
+  case CHARSXP:
+    if (attrib != R_NilValue && TYPEOF(attrib) != CHARSXP)
+      PUSH_NODE(ATTRIB(cur));
+    break;
   case NILSXP:
   case BUILTINSXP:
   case SPECIALSXP:
-  case CHARSXP:
   case LGLSXP:
   case INTSXP:
   case REALSXP:
@@ -706,10 +810,14 @@ static inline void PROCESS_NODE(SEXP cur) {
   case WEAKREFSXP:
   case RAWSXP:
   case S4SXP:
+    if (attrib != R_NilValue)
+      PUSH_NODE(ATTRIB(cur));
     break;
   case STRSXP:
   case EXPRSXP:
   case VECSXP:
+    if (attrib != R_NilValue)
+      PUSH_NODE(ATTRIB(cur));
     {
       R_xlen_t i;
       for (i = 0; i < XLENGTH(cur); i++)
@@ -717,6 +825,8 @@ static inline void PROCESS_NODE(SEXP cur) {
     }
     break;
   case ENVSXP:
+    if (attrib != R_NilValue)
+      PUSH_NODE(ATTRIB(cur));
     PUSH_NODE(FRAME(cur));
     PUSH_NODE(ENCLOS(cur));
     PUSH_NODE(HASHTAB(cur));
@@ -728,11 +838,15 @@ static inline void PROCESS_NODE(SEXP cur) {
   case DOTSXP:
   case SYMSXP:
   case BCODESXP:
+    if (attrib != R_NilValue)
+      PUSH_NODE(ATTRIB(cur));
     PUSH_NODE(TAG(cur));
     PUSH_NODE(CAR(cur));
     PUSH_NODE(CDR(cur));
     break;
   case EXTPTRSXP:
+    if (attrib != R_NilValue)
+      PUSH_NODE(ATTRIB(cur));
     PUSH_NODE(EXTPTR_PROT(cur));
     PUSH_NODE(EXTPTR_TAG(cur));
     break;
@@ -745,7 +859,7 @@ extern void doTraceStack() {
   void ** p = (void**)__builtin_frame_address(0);
 
   while ((uintptr_t)p != R_CStackStart) {
-    // if (isValidSexp(*p) != isValidSexpSlow(*p)) asm("int3");
+    // CHECK(isValidSexp(*p) == isValidSexpSlow(*p));
     if ((uintptr_t)*p % 2 == 0 && isValidSexp(*p)) {
       FORWARD_NODE(*p);
     }
