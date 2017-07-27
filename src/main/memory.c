@@ -469,7 +469,7 @@ static int NodeClassSize[NUM_SMALL_NODE_CLASSES] = { 0, 1, 2, 4, 8, 16 };
 
 /* Node Allocation. */
 
-#define GET_FREE_NODE(s) (s) = allocInBucket(1, sizeof(SEXPREC))
+#define GET_FREE_NODE(s) (s) = allocInBucket(2, sizeof(SEXPREC))
 
 /* Debugging Routines. */
 

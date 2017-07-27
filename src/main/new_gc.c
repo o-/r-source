@@ -1,8 +1,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include <assert.h>
-
 #define USE_RINTERNALS
 
 #ifdef HAVE_CONFIG_H
@@ -29,6 +27,7 @@
 #endif
 
 
+#define BIG_OBJ_ALIGN  64
 #define PAGE_SIZE      0x4000
 #define PAGE_IDX       32
 #define PAGE_IDX_BITS  5
@@ -38,6 +37,14 @@
 #define MARK_GREY  1
 #define MARK_WHITE 0
 
+#define GCDEBUG
+#ifdef GCDEBUG
+#define CHECK(exp) if(!(exp)) asm("int3")
+#define ON_DEBUG(exp) exp
+#else
+#define CHECK(exp) {}
+#define ON_DEBUG {}
+#endif
 
 typedef struct Hashtable {
   size_t size;
@@ -81,12 +88,12 @@ static void Hashtable_add(Hashtable* ht, void* p) {
     Hashtable_occ(ht);
     exit(2);
   }
-  assert(ht->data[idx + el] == 0);
-  assert(el >= 0 && el < ht->bucket_size);
+  CHECK(ht->data[idx + el] == 0);
+  CHECK(el >= 0 && el < ht->bucket_size);
   ht->data[idx + el] = p;
 }
 
-static Rboolean Hashtable_get(Hashtable* ht, void* p) {
+static inline Rboolean Hashtable_get(Hashtable* ht, void* p) {
   long key = Hashtable_h(p);
   long idx = ht->bucket_size * (key & (ht->size-1));
   long el  = 0;
@@ -111,12 +118,12 @@ static void Hashtable_remove(Hashtable* ht, void* p) {
         ++el;
       }
       ht->data[idx + el - 1] = 0;
-      assert(Hashtable_get(ht, p) == FALSE);
+      CHECK(Hashtable_get(ht, p) == FALSE);
       return;
     }
     el++;
   }
-  assert(0);
+  CHECK(0);
 }
 
 static void Hashtable_occ(Hashtable* ht) {
@@ -128,10 +135,11 @@ static void Hashtable_occ(Hashtable* ht) {
   printf("HT usage: %f\n", (double)used / (double)(ht->size * ht->bucket_size));
 }
 
-#define NUM_BUCKETS 6
-static size_t BUCKET_SIZE[NUM_BUCKETS]      = {32, 40, 48, 56, 64, 96};
+#define NUM_BUCKETS 13
+static size_t BUCKET_SIZE[NUM_BUCKETS] = {32, 36, 40, 48, 56, 64, 80, 96, 128, 160, 192, 256, 320};
 
-static size_t HeapLimit = 10 * 1024 * 1024;
+static size_t NormalHeapLimit = 1024 * 1024;
+static size_t TotalHeapLimit = 100 * 1024 * 1024;
 
 static inline size_t roundUp(size_t bs, size_t cs) {
   size_t res = bs / cs;
@@ -144,6 +152,12 @@ typedef struct CellInfo {
   unsigned char mark : 2;
   unsigned char used : 1;
 } CellInfo;
+
+typedef struct SizeInfo {
+  size_t used;
+  size_t free;
+  size_t size;
+} SizeInfo;
 
 typedef struct Page {
   CellInfo info[MAX_IDX];
@@ -178,52 +192,33 @@ static inline Rboolean isMarked(SEXP s) {
   if (s->sxpinfo.gccls == 0) {
     return ptr2page(s)->info[ptr2idx(s)].mark != MARK_WHITE;
   }
-  assert(s->sxpinfo.gccls == 1);
+  CHECK(s->sxpinfo.gccls == 1);
   return ptr2bigObj(s)->info.mark != MARK_WHITE;
 }
 
-static inline Rboolean markIfUnmarked(SEXP s) {
-  if (s->sxpinfo.gccls == 0) {
-    Page* p = ptr2page(s);
-    size_t i = ptr2idx(s);
-    assert(p->info[i].used == 1);
-    if (p->info[i].mark == MARK_WHITE) {
-      if (p->live == 0)
-        p->live = 1;
-      p->info[i].mark = MARK_BLACK;
-      return TRUE;
-    }
-    return FALSE;
-  }
-  assert(s->sxpinfo.gccls == 1);
-  BigObject* o = ptr2bigObj(s);
-  if (o->info.mark == MARK_WHITE) {
-    o->info.mark = MARK_BLACK;
-    return TRUE;
-  }
-  return FALSE;
-}
-
 void verifyPage(Page* page) {
-  assert(page->next == NULL);
+  CHECK(page->next == NULL);
   for (size_t i = ptr2idx((SEXP)page->data); i < ptr2idx((void*)page->end); ++i) {
-    assert(page->info[i].used == 0);
-    assert(page->info[i].mark == MARK_WHITE);
-    assert((void*)&page->info[i] >= (void*)page &&
+    CHECK(page->info[i].used == 0);
+    CHECK(page->info[i].mark == MARK_WHITE);
+    CHECK((void*)&page->info[i] >= (void*)page &&
         (void*)&page->info[i] < (void*)page->finger);
-    assert((void*)&page->data[i] >= (void*)page->finger &&
+    CHECK((void*)&page->data[i] >= (void*)page->finger &&
         (void*)&page->data[i] < (void*)page->end);
   }
   uintptr_t pos = page->finger;
+  size_t last_idx = -1;
   while (pos != page->end) {
-    assert(pos <= page->end);
+    CHECK(pos <= page->end);
     size_t idx = ptr2idx((void*)pos);
-    assert(idx >= 0 && idx <= MAX_IDX);
-    assert(pos < (uintptr_t)page + PAGE_SIZE);
-    assert(ptr2page((void*)pos) == page);
+    CHECK(idx != last_idx);
+    last_idx = idx;
+    CHECK(idx >= 0 && idx <= MAX_IDX);
+    CHECK(pos < (uintptr_t)page + PAGE_SIZE);
+    CHECK(ptr2page((void*)pos) == page);
     pos += BUCKET_SIZE[page->bkt];
   }
-  assert(page->end <= (uintptr_t)page + PAGE_SIZE);
+  CHECK(page->end <= (uintptr_t)page + PAGE_SIZE);
 }
 
 static void doGc();
@@ -235,7 +230,7 @@ Page* allocPage(size_t bkt) {
     Rf_errorcall(R_NilValue, "error alloc");
   memset(data, 0, PAGE_SIZE);
   Page* page = (Page*)data;
-  assert((uintptr_t)page->data % PAGE_IDX == 0);
+  CHECK((uintptr_t)page->data % PAGE_IDX == 0);
   page->next = NULL;
   page->finger = (uintptr_t)page->data;
   page->end = (uintptr_t)page + PAGE_SIZE;
@@ -252,19 +247,15 @@ Page* allocPage(size_t bkt) {
 typedef struct SizeBucket {
   Page* pages;
   Page* cur;
-  size_t used;
-  size_t free;
 } SizeBucket;
 
 struct {
   SizeBucket sizeBucket[NUM_BUCKETS];
   BigObject* bigObjects;
-  size_t bigObjectSize;
-  size_t used;
-  size_t free;
-  size_t size;
   Hashtable* bigObjectsHt;
   Hashtable* pageHt;
+  SizeInfo size;
+  size_t bigObjectSize;
 } HEAP;
 
 static int heapIsInitialized = 0;
@@ -273,14 +264,12 @@ static void new_gc_initHeap() {
     SizeBucket* bucket = &HEAP.sizeBucket[i];
     bucket->pages = NULL;
     bucket->cur = NULL;
-    bucket->used = 0;
-    bucket->free = 0;
   }
   HEAP.bigObjects = NULL;
   HEAP.bigObjectSize = 0;
-  HEAP.used = 0;
-  HEAP.free = 0;
-  HEAP.size = 0;
+  HEAP.size.used = 0;
+  HEAP.size.free = 0;
+  HEAP.size.size = 0;
   heapIsInitialized = 1;
   Hashtable_init(&HEAP.bigObjectsHt);
   Hashtable_init(&HEAP.pageHt);
@@ -295,11 +284,11 @@ static inline Rboolean isValidSexp(void* ptr) {
       ((uintptr_t)ptr - (uintptr_t)page->data) % BUCKET_SIZE[page->bkt];
     Rboolean res = aligned == 0 && page->info[ptr2idx(ptr)].used == 1;
     if (res)
-      assert(((SEXP)ptr)->sxpinfo.gccls == 0);
+      CHECK(((SEXP)ptr)->sxpinfo.gccls == 0);
     return res;
   }
   if (Hashtable_get(HEAP.bigObjectsHt, ptr)) {
-    assert(((SEXP)ptr)->sxpinfo.gccls == 1);
+    CHECK(((SEXP)ptr)->sxpinfo.gccls == 1);
     return TRUE;
   }
   return FALSE;
@@ -334,51 +323,69 @@ SEXP alloc(size_t sz);
 static void* allocBigObj(size_t sexp_sz) {
   size_t sz = sizeof(BigObject) + sexp_sz;
 
-  if (HEAP.size + sz > HeapLimit)
+  if (HEAP.bigObjectSize + sz > HEAP.size.size + TotalHeapLimit)
     doGc();
 
   void* data;
-  int res = posix_memalign(&data, PAGE_IDX, sz);
+  int res = posix_memalign(&data, BIG_OBJ_ALIGN, sz);
   if (res != 0)
     Rf_errorcall(R_NilValue, "error alloc");
+
   BigObject* obj = (BigObject*)data;
   memset(obj, 0, sz);
   // printf("Malloced big %p\n", obj);
+
   obj->info.used = 1;
   obj->next = HEAP.bigObjects;
   obj->size = sz;
+
   HEAP.bigObjects = obj;
   HEAP.bigObjectSize += sz;
-  HEAP.used += sz;
-  HEAP.size += sz;
+
   Hashtable_add(HEAP.bigObjectsHt, obj->data);
   return obj->data;
 }
 
 static void growBucket(size_t bkt) {
-  if (HEAP.size + PAGE_SIZE > HeapLimit)
+  if (HEAP.size.size + PAGE_SIZE > NormalHeapLimit)
     doGc();
 
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   Page* page = allocPage(bkt);
+
   page->next = bucket->pages;
   bucket->pages = page;
   bucket->cur = page;
-  bucket->free += page->end - page->finger;
-  HEAP.free += page->end - page->finger;
-  HEAP.size += page->end - page->finger;
+
+  size_t available = page->end - page->finger;
+
+  HEAP.size.free += available;
+  HEAP.size.size += available;
+
   Hashtable_add(HEAP.pageHt, page);
 }
 
 static inline void updateFreeOnAlloc(SizeBucket* bucket, size_t bucketSz, size_t sz) {
-  bucket->free -= bucketSz;
-  bucket->used += bucketSz;
-  HEAP.free -= bucketSz;
-  HEAP.used += bucketSz;
+  HEAP.size.free -= bucketSz;
+  HEAP.size.used += bucketSz;
 }
 
-static void* allocInBucket(size_t bkt, size_t sz) {
-  assert(BUCKET_SIZE[bkt] >= sz);
+static void* growAllocInBucket(size_t bkt, size_t sz) {
+  SizeBucket* bucket = &HEAP.sizeBucket[bkt];
+  growBucket(bkt);
+  Page* page = bucket->cur;
+  void* res = (void*)page->finger;
+  size_t i = ptr2idx(res);
+  CHECK(page->info[i].used == 0);
+  page->info[i].used = 1;
+  page->finger += BUCKET_SIZE[bkt];
+  updateFreeOnAlloc(bucket, BUCKET_SIZE[bkt], sz);
+  return res;
+}
+
+
+static inline void* allocInBucket(size_t bkt, size_t sz) {
+  CHECK(BUCKET_SIZE[bkt] >= sz);
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   Page* page = bucket->cur;
   if (page != NULL) {
@@ -386,25 +393,17 @@ static void* allocInBucket(size_t bkt, size_t sz) {
     if (next <= page->end) {
       void* res = (void*)page->finger;
       size_t i = ptr2idx(res);
-      assert((uintptr_t)res + BUCKET_SIZE[bkt] <= page->end);
-      assert(ptr2page(res) == page);
-      assert(i > 0 && i < MAX_IDX);
-      assert(page->info[i].used == 0);
+      CHECK((uintptr_t)res + BUCKET_SIZE[bkt] <= page->end);
+      CHECK(ptr2page(res) == page);
+      CHECK(i > 0 && i < MAX_IDX);
+      CHECK(page->info[i].used == 0);
       page->info[i].used = 1;
       page->finger = next;
       updateFreeOnAlloc(bucket, BUCKET_SIZE[bkt], sz);
       return res;
     }
   }
-  growBucket(bkt);
-  page = bucket->cur;
-  void* res = (void*)page->finger;
-  size_t i = ptr2idx(res);
-  assert(page->info[i].used == 0);
-  page->info[i].used = 1;
-  page->finger += BUCKET_SIZE[bkt];
-  updateFreeOnAlloc(bucket, BUCKET_SIZE[bkt], sz);
-  return res;
+  return growAllocInBucket(bkt, sz);
 }
 
 SEXP alloc(size_t sz) {
@@ -541,22 +540,29 @@ static void sweep();
 static void traceStack();
 
 #define MS_SIZE 40000
-static SEXP MarkStack[MS_SIZE];
+static SEXP MarkStack[MS_SIZE+2];
 static size_t MSpos = 0;
 
+static void PROCESS_NODE(SEXP);
 void static doGc() {
   // printf(".\n");
-  assert(HEAP.size = HEAP.used + HEAP.free);
+  CHECK(HEAP.size.size = HEAP.size.used + HEAP.size.free);
 
+  ptr2page(R_NilValue)->info[ptr2idx(R_NilValue)].mark = MARK_BLACK;
+  PROCESS_NODE(R_NilValue);
 
   traceStack();
   traceHeap();
-  assert(MSpos == 0);
+  CHECK(MSpos == 0);
   sweep();
 
-  if ((double)HEAP.size / (double)HeapLimit > 1.1) {
-    printf("Grow Heap to %d kb\n", HeapLimit / 1024);
-    HeapLimit = (double)HeapLimit * 1.2;
+  if ((double)HEAP.size.size / (double)NormalHeapLimit > 1.1) {
+    NormalHeapLimit = (double)NormalHeapLimit * 1.2;
+    printf("Grow Heap to %d kb\n", NormalHeapLimit / 1024);
+  }
+  if ((double)(HEAP.bigObjectSize + HEAP.size.size) / (double)TotalHeapLimit > 1.1) {
+    TotalHeapLimit = (double)TotalHeapLimit * 1.2;
+    printf("Grow Total Heap to %d kb\n", TotalHeapLimit / 1024);
   }
 }
 
@@ -568,30 +574,28 @@ static void sweep() {
     while (p != NULL) {
       if (p->live == 0) {
         // for (size_t i = 0; i < MAX_IDX; ++i) {
-        //   assert(p->info[i].mark == MARK_WHITE);
+        //   CHECK(p->info[i].mark == MARK_WHITE);
         // }
-        bucket->free -= p->end - p->finger;
-        bucket->used -= p->finger - (uintptr_t)p->data;
-        HEAP.free -= p->end - p->finger;
-        HEAP.used -= p->finger - (uintptr_t)p->data;
-        HEAP.size -= p->end - (uintptr_t)p->data;
+        HEAP.size.free -= p->end - p->finger;
+        HEAP.size.used -= p->finger - (uintptr_t)p->data;
+        HEAP.size.size -= p->end - (uintptr_t)p->data;
         if (bucket->cur == p)
           bucket->cur = NULL;
         void * del = p;
         Hashtable_remove(HEAP.pageHt, del);
         *prevptr = p->next;
         p = p->next;
-        memset(del, 0xde, PAGE_SIZE);
+        ON_DEBUG(memset(del, 0xde, PAGE_SIZE));
         free(del);
       } else {
         uintptr_t finger = (uintptr_t)p->data;
         while (finger < p->end) {
           size_t i = ptr2idx((void*)finger);
-          assert(i < MAX_IDX);
+          CHECK(i < MAX_IDX);
           if (p->info[i].mark == MARK_WHITE) {
             if (p->info[i].used == 1) {
               p->info[i].used = 0;
-              memset((void*)finger, 0xde, BUCKET_SIZE[p->bkt]);
+              ON_DEBUG(memset((void*)finger, 0xde, BUCKET_SIZE[p->bkt]));
             }
           } else {
             p->info[i].mark = MARK_WHITE;
@@ -609,14 +613,12 @@ static void sweep() {
   while (o != NULL) {
     if (o->info.mark == MARK_WHITE) {
       HEAP.bigObjectSize -= o->size;
-      HEAP.used -= o->size;
-      HEAP.size -= o->size;
       void* del = o;
       size_t sz = o->size;
       Hashtable_remove(HEAP.bigObjectsHt, o->data);
       *prevptr = o->next;
       o = o->next;
-      memset(del, 0xde, sz);
+      ON_DEBUG(memset(del, 0xde, sz));
       free(del);
     } else {
       o->info.mark = MARK_WHITE;
@@ -626,15 +628,44 @@ static void sweep() {
   }
 }
 
+static Page* lastPage = NULL;
+static inline Rboolean markIfUnmarked(SEXP s) {
+  BigObject* o = ptr2bigObj(s);
+  if ((uintptr_t)o % BIG_OBJ_ALIGN != 0 || s->sxpinfo.gccls == 0) {
+    CHECK (s->sxpinfo.gccls == 0);
+    Page* p = ptr2page(s);
+    size_t i = ptr2idx(s);
+    CHECK(p->info[i].used == 1);
+    if (p->info[i].mark == MARK_WHITE) {
+      if (p->live == 0)
+        p->live = 1;
+      p->info[i].mark = MARK_BLACK;
+      return TRUE;
+    }
+    return FALSE;
+  }
+
+  CHECK (s->sxpinfo.gccls == 1);
+  if (o->info.mark == MARK_WHITE) {
+    o->info.mark = MARK_BLACK;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+# define HAS_GENUINE_ATTRIB(x) \
+    (ATTRIB(x) != R_NilValue && \
+     (TYPEOF(x) != CHARSXP || TYPEOF(ATTRIB(x)) != CHARSXP))
+
 static inline Rboolean NODE_IS_MARKED(SEXP s) {
   return isMarked(s);
 }
 
-static void PROCESS_NODE(SEXP);
 static void PROCESS_NODES();
+static void PUSH_NODE(SEXP);
 
 static inline void FORWARD_NODE(SEXP s) {
-  if (s == NULL) return;
+  if (s == NULL || s == R_NilValue) return;
   if (markIfUnmarked(s)) {
     PROCESS_NODE(s);
   }
@@ -648,25 +679,22 @@ static inline void PROCESS_NODES() {
 }
 
 static inline void PUSH_NODE(SEXP s) {
-  if (s == NULL) return;
+  if (s == NULL || s == R_NilValue) return;
+  if (MSpos >= MS_SIZE) {
+    puts("mstack overflow");
+    exit(2);
+  }
   if (markIfUnmarked(s)) {
-    if (MSpos >= MS_SIZE) {
-      puts("mstack overflow");
-      exit(2);
-    }
     MarkStack[MSpos++] = s;
   }
 }
 
-# define HAS_GENUINE_ATTRIB(x) \
-    (ATTRIB(x) != R_NilValue && \
-     (TYPEOF(x) != CHARSXP || TYPEOF(ATTRIB(x)) != CHARSXP))
-
 static inline void PROCESS_NODE(SEXP cur) {
-  if (HAS_GENUINE_ATTRIB(cur))
+  if (HAS_GENUINE_ATTRIB(cur)) {
     PUSH_NODE(ATTRIB(cur));
+  }
 
-  switch (TYPEOF(cur)) {
+  switch (cur->sxpinfo.type) {
   case NILSXP:
   case BUILTINSXP:
   case SPECIALSXP:
@@ -709,7 +737,7 @@ static inline void PROCESS_NODE(SEXP cur) {
     PUSH_NODE(EXTPTR_TAG(cur));
     break;
   default:
-    assert(0);
+    CHECK(0);
   }
 }
 
@@ -718,7 +746,7 @@ extern void doTraceStack() {
 
   while ((uintptr_t)p != R_CStackStart) {
     // if (isValidSexp(*p) != isValidSexpSlow(*p)) asm("int3");
-    if ((uintptr_t)*p % 4 == 0 && isValidSexp(*p)) {
+    if ((uintptr_t)*p % 2 == 0 && isValidSexp(*p)) {
       FORWARD_NODE(*p);
     }
     p += R_CStackDir;

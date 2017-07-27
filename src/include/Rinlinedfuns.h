@@ -78,6 +78,7 @@
 
 INLINE_FUN SEXP protect(SEXP s)
 {
+  return s;
 }
 
 INLINE_FUN void unprotect(int l)
