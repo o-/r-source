@@ -53,8 +53,8 @@ typedef struct Hashtable {
 } Hashtable;
 
 static void Hashtable_init(Hashtable** ht) {
-  size_t size = 512;
-  size_t bucket_size = 24;
+  size_t size = 64;
+  size_t bucket_size = 16;
 
   size_t sz = sizeof(Hashtable) + size*bucket_size*sizeof(void*);
   Hashtable* h = malloc(sz);
@@ -63,6 +63,25 @@ static void Hashtable_init(Hashtable** ht) {
   h->size = size;
   h->bucket_size = bucket_size;
   *ht = h;
+}
+
+static Rboolean Hashtable_add(Hashtable* ht, void* p);
+static void Hashtable_grow(Hashtable** ht) {
+  Hashtable* old = *ht;
+  size_t size = old->size * 2;
+  size_t sz = sizeof(Hashtable) + size*old->bucket_size*sizeof(void*);
+  Hashtable* h = malloc(sz);
+  if (h == NULL) exit(1);
+  memset(h, 0, sz);
+  h->size = size;
+  h->bucket_size = old->bucket_size;
+  size_t max = old->size*old->bucket_size;
+  for (size_t i = 0; i < max; ++i) {
+    if (old->data[i] != NULL)
+      Hashtable_add(h, old->data[i]);
+  }
+  *ht = h;
+  free(old);
 }
 
 static uint32_t Hashtable_h(void* k) {
@@ -76,7 +95,7 @@ static uint32_t Hashtable_h(void* k) {
 }
 
 static void Hashtable_occ(Hashtable* ht);
-static void Hashtable_add(Hashtable* ht, void* p) {
+static Rboolean Hashtable_add(Hashtable* ht, void* p) {
   long key = Hashtable_h(p);
   long idx = ht->bucket_size * (key & (ht->size-1));
   long el  = 0;
@@ -84,13 +103,12 @@ static void Hashtable_add(Hashtable* ht, void* p) {
     ++el;
   }
   if (el == ht->bucket_size) {
-    puts("cannot grow ht");
-    Hashtable_occ(ht);
-    exit(2);
+    return FALSE;
   }
   CHECK(ht->data[idx + el] == 0);
   CHECK(el >= 0 && el < ht->bucket_size);
   ht->data[idx + el] = p;
+  return TRUE;
 }
 
 static inline Rboolean Hashtable_get(Hashtable* ht, void* p) {
@@ -351,7 +369,9 @@ static void* allocBigObj(size_t sexp_sz) {
   HEAP.bigObjects = obj;
   HEAP.bigObjectSize += sz;
 
-  Hashtable_add(HEAP.bigObjectsHt, obj->data);
+  while (!Hashtable_add(HEAP.bigObjectsHt, obj->data))
+    Hashtable_grow(&HEAP.bigObjectsHt);
+
   return obj->data;
 }
 
@@ -371,7 +391,8 @@ static void growBucket(size_t bkt) {
   HEAP.size.free += available;
   HEAP.size.size += available;
 
-  Hashtable_add(HEAP.pageHt, page);
+  while (!Hashtable_add(HEAP.pageHt, page))
+    Hashtable_grow(&HEAP.pageHt);
 }
 
 static inline void updateFreeOnAlloc(SizeBucket* bucket, size_t bucketSz, size_t sz) {
