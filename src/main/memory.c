@@ -465,11 +465,9 @@ static int NodeClassSize[NUM_SMALL_NODE_CLASSES] = { 0, 1, 2, 4, 8, 16 };
 #define NODE_CLASS(s) ((s)->sxpinfo.gccls)
 #define SET_NODE_CLASS(s,v) (((s)->sxpinfo.gccls) = (v))
 
-#define CHECK_OLD_TO_NEW(x,y) do { } while (0)
-
 /* Node Allocation. */
 
-#define GET_FREE_NODE(s) (s) = allocInBucket(2, sizeof(SEXPREC))
+#define GET_FREE_NODE(s) (s) = allocInBucket(1)
 
 /* Debugging Routines. */
 

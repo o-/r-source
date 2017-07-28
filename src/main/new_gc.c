@@ -27,7 +27,7 @@
 #endif
 
 
-#define BIG_OBJ_ALIGN  64
+#define BIG_OBJ_ALIGN  16
 #define PAGE_SIZE      0x4000
 #define PAGE_IDX       32
 #define PAGE_IDX_BITS  5
@@ -37,7 +37,7 @@
 #define MARK_GREY  1
 #define MARK_WHITE 0
 
-// #define GCDEBUG
+#define GCDEBUG
 #ifdef GCDEBUG
 #define CHECK(exp) if(!(exp)) asm("int3")
 #define ON_DEBUG(exp) exp
@@ -153,116 +153,115 @@ static void Hashtable_occ(Hashtable* ht) {
   printf("HT usage: %f\n", (double)used / (double)(ht->size * ht->bucket_size));
 }
 
-#define NUM_BUCKETS 13
-static size_t BUCKET_SIZE[NUM_BUCKETS] = {32, 36, 40, 48, 56, 64, 80, 96, 128, 160, 192, 256, 320};
+  static unsigned collectGen = 0;
+  static unsigned lastCollectGen = 0;
+  static size_t gc_cnt = 0;
 
-static size_t NormalHeapLimit = 4 * 1024 * 1024;
-static size_t TotalHeapLimit = 10 * 1024 * 1024;
+#define NUM_BUCKETS 12
+  static size_t BUCKET_SIZE[NUM_BUCKETS] = {32, 40, 48, 56, 64, 80, 96, 128, 160, 192, 256, 320};
+  static size_t INITIAL_PAGE_LIMIT[NUM_BUCKETS] = {100, 200, 20, 10, 10, 10, 10, 10, 10, 10, 10, 10};
+  static size_t INITIAL_BIG_OBJ_LIMIT = 4 * 1024 * 1024;
+  static double PAGE_PROMOTE_TRESHOLD = 0.04;
+  static double GROW_RATE = 1.2;
 
-static inline size_t roundUp(size_t bs, size_t cs) {
-  size_t res = bs / cs;
-  if (res * cs >= bs)
-    return res;
-  return res+1;
-}
-
-typedef struct CellInfo {
-  unsigned char mark : 2;
-  unsigned char used : 1;
-} CellInfo;
-
-typedef struct SizeInfo {
-  size_t used;
-  size_t free;
-  size_t size;
-} SizeInfo;
-
-typedef struct Page {
-  CellInfo info[MAX_IDX];
-  int bkt  : 8;
-  int live : 1;
-  int busy : 1;
-  struct Page* next;
-  uintptr_t end;
-  uintptr_t finger;
-  uintptr_t sweep_finger;
-  uintptr_t sweep_end;
-  size_t free;
-  char data[];
-} Page;
-
-typedef struct BigObject {
-  CellInfo info;
-  struct BigObject* next;
-  size_t size;
-  char data[];
-} BigObject;
-
-static inline Page* ptr2page(void* ptr) {
-  return (Page*)((uintptr_t)ptr & ~PAGE_MASK);
-}
-
-static inline size_t ptr2idx(void* ptr) {
-  return ((uintptr_t)ptr & PAGE_MASK) >> PAGE_IDX_BITS;
-}
-
-static inline BigObject* ptr2bigObj(SEXP ptr) {
-  return (BigObject*)((uintptr_t)ptr - sizeof(BigObject));
-}
-
-static inline Rboolean isMarked(SEXP s) {
-  if (s->sxpinfo.gccls == 0) {
-    return ptr2page(s)->info[ptr2idx(s)].mark != MARK_WHITE;
+  static inline size_t roundUp(size_t bs, size_t cs) {
+    size_t res = bs / cs;
+    if (res * cs >= bs)
+      return res;
+    return res+1;
   }
-  CHECK(s->sxpinfo.gccls == 1);
-  return ptr2bigObj(s)->info.mark != MARK_WHITE;
-}
 
-void verifyPage(Page* page) {
-  CHECK(page->next == NULL);
-  for (size_t i = ptr2idx((SEXP)page->data); i < ptr2idx((void*)page->end); ++i) {
-    CHECK(page->info[i].used == 0);
-    CHECK(page->info[i].mark == MARK_WHITE);
-    CHECK((void*)&page->info[i] >= (void*)page &&
-        (void*)&page->info[i] < (void*)page->finger);
-    CHECK((void*)&page->data[i] >= (void*)page->finger &&
-        (void*)&page->data[i] < (void*)page->end);
+  typedef struct CellInfo {
+    unsigned char mark : 2;
+    unsigned char used : 1;
+  } CellInfo;
+
+#define MAX_GEN 2
+
+  typedef struct Page {
+    CellInfo info[MAX_IDX];
+    int bkt  : 8;
+    int live : 1;
+    struct Page* next;
+    uintptr_t end;
+    uintptr_t finger;
+    uintptr_t sweep_finger;
+    uintptr_t sweep_end;
+    size_t free_nodes;
+    size_t available_nodes;
+    char data[];
+  } Page;
+
+  typedef struct BigObject {
+    CellInfo info;
+    struct BigObject* next;
+    size_t size;
+    char data[];
+  } BigObject;
+
+  static inline Page* ptr2page(void* ptr) {
+    return (Page*)((uintptr_t)ptr & ~PAGE_MASK);
   }
-  uintptr_t pos = page->finger;
-  size_t last_idx = -1;
-  while (pos != page->end) {
-    CHECK(pos <= page->end);
-    size_t idx = ptr2idx((void*)pos);
-    CHECK(idx != last_idx);
-    last_idx = idx;
-    CHECK(idx >= 0 && idx <= MAX_IDX);
-    CHECK(pos < (uintptr_t)page + PAGE_SIZE);
-    CHECK(ptr2page((void*)pos) == page);
-    pos += BUCKET_SIZE[page->bkt];
+
+  static inline size_t ptr2idx(void* ptr) {
+    return ((uintptr_t)ptr & PAGE_MASK) >> PAGE_IDX_BITS;
   }
-  CHECK(page->end <= (uintptr_t)page + PAGE_SIZE);
-}
 
-static void doGc();
+  static inline BigObject* ptr2bigObj(SEXP ptr) {
+    return (BigObject*)((uintptr_t)ptr - sizeof(BigObject));
+  }
 
-Page* allocPage(size_t bkt) {
-  void* data;
-  int res = posix_memalign(&data, PAGE_SIZE, PAGE_SIZE);
-  if (res != 0)
-    Rf_errorcall(R_NilValue, "error alloc");
-  memset(data, 0, PAGE_SIZE);
-  Page* page = (Page*)data;
-  // CHECK((uintptr_t)page->data % PAGE_IDX == 0);
-  page->next = NULL;
-  page->finger = (uintptr_t)page->data;
-  page->end = (uintptr_t)page + PAGE_SIZE;
-  size_t available = page->end - page->finger;
-  size_t tail = available % BUCKET_SIZE[bkt];
-  page->end -= tail;
-  page->bkt = bkt;
-  page->live = 0;
-  page->busy = 0;
-  page->free = available / BUCKET_SIZE[bkt];
+  static inline Rboolean isMarked(SEXP s) {
+    if (s->sxpinfo.gccls == 0) {
+      return ptr2page(s)->info[ptr2idx(s)].mark != MARK_WHITE;
+    }
+    CHECK(s->sxpinfo.gccls == 1);
+    return ptr2bigObj(s)->info.mark != MARK_WHITE;
+  }
+
+  void verifyPage(Page* page) {
+    CHECK(page->next == NULL);
+    for (size_t i = ptr2idx((SEXP)page->data); i < ptr2idx((void*)page->end); ++i) {
+      CHECK(page->info[i].used == 0);
+      CHECK(page->info[i].mark == MARK_WHITE);
+      CHECK((void*)&page->info[i] >= (void*)page &&
+          (void*)&page->info[i] < (void*)page->finger);
+      CHECK((void*)&page->data[i] >= (void*)page->finger &&
+          (void*)&page->data[i] < (void*)page->end);
+    }
+    uintptr_t pos = page->finger;
+    size_t last_idx = -1;
+    while (pos != page->end) {
+      CHECK(pos <= page->end);
+      size_t idx = ptr2idx((void*)pos);
+      CHECK(idx != last_idx);
+      last_idx = idx;
+      CHECK(idx >= 0 && idx <= MAX_IDX);
+      CHECK(pos < (uintptr_t)page + PAGE_SIZE);
+      CHECK(ptr2page((void*)pos) == page);
+      pos += BUCKET_SIZE[page->bkt];
+    }
+    CHECK(page->end <= (uintptr_t)page + PAGE_SIZE);
+  }
+
+  static void doGc(unsigned);
+  Page* allocPage(unsigned bkt) {
+    void* data;
+    int res = posix_memalign(&data, PAGE_SIZE, PAGE_SIZE);
+    if (res != 0)
+      Rf_errorcall(R_NilValue, "error alloc");
+    memset(data, 0, PAGE_SIZE);
+    Page* page = (Page*)data;
+    // CHECK((uintptr_t)page->data % PAGE_IDX == 0);
+    page->next = NULL;
+    page->finger = (uintptr_t)page->data;
+    page->end = (uintptr_t)page + PAGE_SIZE;
+    size_t available = page->end - page->finger;
+    size_t tail = available % BUCKET_SIZE[bkt];
+    page->end -= tail;
+    page->bkt = bkt;
+    page->live = 0;
+  page->free_nodes = page->available_nodes = available / BUCKET_SIZE[bkt];
   page->sweep_finger = page->sweep_end = (uintptr_t)page->data;
   // printf("allocated a %d page %p from %p to %p\n", bkt, page, page->finger, page->end);
   verifyPage(page);
@@ -273,6 +272,8 @@ typedef struct SizeBucket {
   Page* cur;
   Page* pages;
   Page* next_to_sweep;
+  size_t page_limit;
+  size_t num_pages;
 } SizeBucket;
 
 struct {
@@ -280,8 +281,9 @@ struct {
   BigObject* bigObjects;
   Hashtable* bigObjectsHt;
   Hashtable* pageHt;
-  SizeInfo size;
   size_t bigObjectSize;
+  size_t bigObjectLimit;
+  size_t size;
 } HEAP;
 
 static int heapIsInitialized = 0;
@@ -291,15 +293,16 @@ static void new_gc_initHeap() {
     bucket->pages = NULL;
     bucket->cur = NULL;
     bucket->next_to_sweep = NULL;
+    bucket->page_limit = INITIAL_PAGE_LIMIT[i];
+    bucket->num_pages = 0;
   }
   HEAP.bigObjects = NULL;
   HEAP.bigObjectSize = 0;
-  HEAP.size.used = 0;
-  HEAP.size.free = 0;
-  HEAP.size.size = 0;
-  heapIsInitialized = 1;
+  HEAP.bigObjectLimit = INITIAL_BIG_OBJ_LIMIT;
+  HEAP.size = 0;
   Hashtable_init(&HEAP.bigObjectsHt);
   Hashtable_init(&HEAP.pageHt);
+  heapIsInitialized = 1;
 }
 
 static inline Rboolean isValidSexp(void* ptr) {
@@ -350,8 +353,9 @@ SEXP alloc(size_t sz);
 static void* allocBigObj(size_t sexp_sz) {
   size_t sz = sizeof(BigObject) + sexp_sz;
 
-  if (HEAP.bigObjectSize + sz > HEAP.size.size + TotalHeapLimit)
-    doGc();
+  if (HEAP.bigObjectSize + sz > HEAP.bigObjectLimit)
+    doGc(NUM_BUCKETS);
+  // TODO need grow?
 
   void* data;
   int res = posix_memalign(&data, BIG_OBJ_ALIGN, sz);
@@ -375,10 +379,7 @@ static void* allocBigObj(size_t sexp_sz) {
   return obj->data;
 }
 
-static void growBucket(size_t bkt) {
-  if (HEAP.size.size + PAGE_SIZE > NormalHeapLimit)
-    doGc();
-
+static void growBucket(unsigned bkt) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   Page* page = allocPage(bkt);
 
@@ -388,33 +389,33 @@ static void growBucket(size_t bkt) {
 
   size_t available = page->end - page->finger;
 
-  HEAP.size.free += available;
-  HEAP.size.size += available;
+  HEAP.size += available;
+  bucket->num_pages++;
 
   while (!Hashtable_add(HEAP.pageHt, page))
     Hashtable_grow(&HEAP.pageHt);
 }
 
-static inline void updateFreeOnAlloc(SizeBucket* bucket, size_t bucketSz, size_t sz) {
-  HEAP.size.free -= bucketSz;
-  HEAP.size.used += bucketSz;
-}
-
 static void* findPageToSweep(SizeBucket* bucket) {
   Page* page = bucket->next_to_sweep;
-  while (page != NULL && (page->sweep_finger == page->sweep_end || page->busy)) {
+  while (page != NULL) {
     CHECK(page->sweep_finger <= page->sweep_end);
+    if (page->sweep_finger <= page->sweep_end)
+      break;
     page = page->next;
   }
   bucket->next_to_sweep = page == NULL ? NULL : page->next;
   bucket->cur = page;
 }
 
-static void* slowAllocInBucket(size_t bkt, size_t sz) {
+static void* sweepAllocInBucket(unsigned bkt) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
 
+  if (bucket->cur == NULL)
+    findPageToSweep(bucket);
+
   // Lazy sweeping
-  while (bucket->next_to_sweep != NULL && bucket->cur != NULL) {
+  while (bucket->cur != NULL) {
     Page* page = bucket->cur;
     uintptr_t finger = page->sweep_finger;
     while (finger < page->sweep_end) {
@@ -425,7 +426,7 @@ static void* slowAllocInBucket(size_t bkt, size_t sz) {
       if (page->info[i].mark == MARK_WHITE) {
         if (page->info[i].used == 0) {
           page->info[i].used = 1;
-          page->free--;
+          page->free_nodes--;
         }
         memset(res, 0, BUCKET_SIZE[bkt]);
         page->sweep_finger = finger;
@@ -437,23 +438,50 @@ static void* slowAllocInBucket(size_t bkt, size_t sz) {
     page->sweep_finger = page->sweep_end;
     findPageToSweep(bucket);
   }
-
-  growBucket(bkt);
-  Page* page = bucket->cur;
-  void* res = (void*)page->finger;
-  size_t i = ptr2idx(res);
-  CHECK(page->info[i].used == 0);
-  page->info[i].used = 1;
-  page->finger += BUCKET_SIZE[bkt];
-  updateFreeOnAlloc(bucket, BUCKET_SIZE[bkt], sz);
-  return res;
+  return NULL;
 }
 
+static inline void* allocInBucket(unsigned bkt);
+static void* slowAllocInBucket(unsigned bkt) {
+  {
+    // Try to lazy sweep some free space
+    void* res = sweepAllocInBucket(bkt);
+    if (res)
+      return res;
+  }
 
-static inline void* allocInBucket(size_t bkt, size_t sz) {
-  CHECK(BUCKET_SIZE[bkt] >= sz);
+  // No luck so far. If we are below the page limit
+  // we can allocate more. Otherwise we need to do a gc.
+  SizeBucket* bucket = &HEAP.sizeBucket[bkt];
+  if (bucket->page_limit <= bucket->num_pages) {
+    doGc(bkt);
+    // TODO: something a more sane...
+    return allocInBucket(bkt);
+  }
+
+  if (bucket->page_limit <= bucket->num_pages) {
+    puts("fatal, run out of space");
+    exit(2);
+  }
+
+  growBucket(bkt);
+
+  {
+    Page* page = bucket->cur;
+    void* res = (void*)page->finger;
+    size_t i = ptr2idx(res);
+    CHECK(page->info[i].used == 0);
+    page->info[i].used = 1;
+    page->finger += BUCKET_SIZE[bkt];
+    page->free_nodes--;
+    return res;
+  }
+}
+
+static inline void* allocInBucket(unsigned bkt) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   Page* page = bucket->cur;
+  // First try bump pointer alloc in the current page
   if (page != NULL) {
     size_t next = page->finger + BUCKET_SIZE[bkt];
     if (next <= page->end) {
@@ -465,19 +493,19 @@ static inline void* allocInBucket(size_t bkt, size_t sz) {
       CHECK(page->info[i].used == 0);
       page->info[i].used = 1;
       page->finger = next;
-      page->free--;
-      updateFreeOnAlloc(bucket, BUCKET_SIZE[bkt], sz);
+      page->free_nodes--;
       return res;
     }
   }
-  return slowAllocInBucket(bkt, sz);
+  CHECK(page == NULL || page->finger == page->end);
+  return slowAllocInBucket(bkt);
 }
 
 SEXP alloc(size_t sz) {
-  size_t bkt = 0;
+  unsigned bkt = 0;
   while (bkt < NUM_BUCKETS && BUCKET_SIZE[bkt] < sz) ++bkt;
   if (bkt < NUM_BUCKETS) {
-    SEXP res = (SEXP)allocInBucket(bkt, sz);
+    SEXP res = (SEXP)allocInBucket(bkt);
     res->sxpinfo.gccls = 0;
     // printf("allo %p for %d in %d\n", res, sz, BUCKET_SIZE[bkt]);
     return res;
@@ -603,48 +631,51 @@ SEXP new_gc_allocVector3(SEXPTYPE type, R_xlen_t length, R_allocator_t *allocato
 }
 
 static void traceHeap();
-static void finish_sweep();
-static void lazy_sweep();
+static void finish_sweep(unsigned);
+static void lazy_sweep(unsigned);
 static void traceStack();
 
 #define MS_SIZE 40000
 static SEXP MarkStack[MS_SIZE+2];
 static size_t MSpos = 0;
 
-static size_t gc_cnt = 0;
 static void heapStatistics() {
-  printf("HEAP statistics after gc %d : total limit %d, small limit %d, actual size %d+%d=%d, used %d+%d=%d\n",
+  printf("HEAP statistics after gc %d of gen %d: size %d\n",
       gc_cnt,
-      TotalHeapLimit / 1024,
-      NormalHeapLimit / 1024,
-      HEAP.size.size / 1024,
-      HEAP.bigObjectSize / 1024,
-      HEAP.size.size+HEAP.bigObjectSize / 1024,
-      HEAP.size.used / 1024,
-      HEAP.bigObjectSize / 1024,
-      HEAP.size.used+HEAP.bigObjectSize / 1024);
+      collectGen,
+      HEAP.size / 1024 / 1024);
+
   for (size_t i = 0; i < NUM_BUCKETS; ++i) {
-    size_t used = 0;
-    size_t wasted = 0;
+    size_t free = 0;
+    size_t available = 0;
     Page* p = HEAP.sizeBucket[i].pages;
     while (p != NULL) {
-      used += p->end - (uintptr_t)p->data;
-      wasted += p->free * BUCKET_SIZE[i];
+      free += p->free_nodes;
+      available += p->available_nodes;
       p = p->next;
     }
-    printf(" Bucket %d (%d) : size %d, wasted %d   (%f)\n", i, BUCKET_SIZE[i],
-        used  / 1024,
-        wasted / 1024,
-        (float)wasted / (float)(used+wasted));
+    printf(" Bucket %d (%d) : pages %d / %d, nodes free %d   (%f)\n",
+        i, BUCKET_SIZE[i],
+        HEAP.sizeBucket[i].num_pages,
+        HEAP.sizeBucket[i].page_limit,
+        free,
+        (float)free / (float)available);
   }
 }
 
-static void PROCESS_NODE(SEXP);
-void static doGc() {
-  // printf(".\n");
-  CHECK(HEAP.size.size = HEAP.size.used + HEAP.size.free);
 
-  finish_sweep();
+static double pressure(unsigned bkt) {
+  if (bkt == NUM_BUCKETS) {
+    return (double)HEAP.bigObjectSize / (double)HEAP.bigObjectLimit;
+  }
+  SizeBucket* b = &HEAP.sizeBucket[bkt];
+  return (double)b->num_pages / (double)b->page_limit;
+}
+
+static void PROCESS_NODE(SEXP);
+void static doGc(unsigned bkt) {
+  finish_sweep(collectGen);
+  double p_before = pressure(bkt);
 
   ptr2page(R_NilValue)->info[ptr2idx(R_NilValue)].mark = MARK_BLACK;
   PROCESS_NODE(R_NilValue);
@@ -652,57 +683,81 @@ void static doGc() {
   traceStack();
   traceHeap();
   CHECK(MSpos == 0);
-  lazy_sweep();
 
-  if ((double)HEAP.size.size / (double)NormalHeapLimit > 0.8) {
-    NormalHeapLimit = (double)NormalHeapLimit * 1.1;
-    // printf("Grow Heap to %d kb\n", NormalHeapLimit / 1024);
-  }
-  if (NormalHeapLimit > TotalHeapLimit)
-    TotalHeapLimit = (double)NormalHeapLimit * 1.1;
-  if ((double)(HEAP.bigObjectSize + HEAP.size.size) / (double)TotalHeapLimit > 0.8) {
-    TotalHeapLimit = (double)TotalHeapLimit * 1.1;
-    // printf("Grow Total Heap to %d kb\n", TotalHeapLimit / 1024);
+  lazy_sweep(collectGen);
+
+  gc_cnt++;
+#ifdef GCDEBUG
+//  if (gc_cnt % 10 == 0)
+//     heapStatistics();
+#endif
+
+  lastCollectGen = collectGen;
+  double p_after = pressure(bkt);
+  double relief = p_before-p_after;
+
+  if (relief < 0.2 && collectGen == MAX_GEN) {
+    if (bkt == NUM_BUCKETS) {
+      HEAP.bigObjectLimit *= GROW_RATE;
+    } else {
+      HEAP.sizeBucket[bkt].page_limit *= GROW_RATE;
+    }
   }
 
-  ++gc_cnt;
-  // if (gc_cnt % 10 == 0)
-  //   heapStatistics();
+  collectGen = 0;
+  if (relief < 0.03)
+    collectGen = 2;
+  else if (relief < 0.06)
+    collectGen = 1;
 }
 
-static void finish_sweep() {
+static void finish_sweep(unsigned gen) {
   for (size_t s = 0; s < NUM_BUCKETS; ++s) {
     SizeBucket* bucket = &HEAP.sizeBucket[s];
     Page* p = bucket->pages;
     while (p != NULL) {
       CHECK(p->sweep_finger <= p->sweep_end && p->sweep_end <= p->finger);
-      uintptr_t finger = p->sweep_finger;
-      while (finger < p->sweep_end) {
+        uintptr_t finger = p->sweep_finger;
+        while (finger < p->sweep_end) {
         size_t i = ptr2idx((void*)finger);
         CHECK(i < MAX_IDX);
         if (p->info[i].mark == MARK_WHITE) {
           if (p->info[i].used == 1) {
             p->info[i].used = 0;
             ON_DEBUG(memset((void*)finger, 0xde, BUCKET_SIZE[p->bkt]));
-            p->free++;
+            p->free_nodes++;
           }
         } else {
           p->info[i].mark = MARK_WHITE;
         }
         finger += BUCKET_SIZE[p->bkt];
+        CHECK(p->free_nodes <= p->available_nodes);
+        p->sweep_finger = p->sweep_end;
       }
-      p->sweep_finger = p->sweep_end;
-      size_t nodes = (p->end - p->finger) / BUCKET_SIZE[p->bkt];
-      if ((double)p->free / (double)nodes < 0.1)
-        p->busy = 1;
-      else
-        p->busy = 0;
       p = p->next;
     }
   }
 }
 
-static void lazy_sweep() {
+static void findPageToBump(SizeBucket* bucket) {
+  bucket->cur = NULL;
+  Page* page = bucket->pages;
+  while (page != NULL) {
+    CHECK(page->sweep_finger <= page->sweep_end &&
+        page->sweep_end <= page->finger && page->finger <= page->end);
+    if (page->finger < page->end) {
+      // There should only ever be one page with free bump space
+      CHECK(bucket->cur == NULL);
+      bucket->cur = page;
+#ifndef GCDEBUG
+      return;
+#endif
+    }
+    page = page->next;
+  }
+}
+
+static void lazy_sweep(unsigned gen) {
   for (size_t s = 0; s < NUM_BUCKETS; ++s) {
     SizeBucket* bucket = &HEAP.sizeBucket[s];
     Page* p = bucket->pages;
@@ -710,9 +765,9 @@ static void lazy_sweep() {
 
     while (p != NULL) {
       if (p->live == 0) {
-        HEAP.size.free -= p->end - p->finger;
-        HEAP.size.used -= p->finger - (uintptr_t)p->data;
-        HEAP.size.size -= p->end - (uintptr_t)p->data;
+        HEAP.size -= p->end - p->finger;
+        CHECK(bucket->num_pages > 0);
+        bucket->num_pages--;
         if (bucket->cur == p)
           bucket->cur = NULL;
         void * del = p;
@@ -722,6 +777,7 @@ static void lazy_sweep() {
         ON_DEBUG(memset(del, 0xde, PAGE_SIZE));
         free(del);
       } else {
+        // Set up the page for lazy sweeping
         p->live = 0;
         p->sweep_finger = (uintptr_t)p->data;
         p->sweep_end = p->finger;
@@ -731,6 +787,7 @@ static void lazy_sweep() {
     }
 
     bucket->next_to_sweep = bucket->pages;
+    findPageToBump(bucket);
   }
   BigObject* o = HEAP.bigObjects;
   BigObject** prevptr = &HEAP.bigObjects;
@@ -903,5 +960,12 @@ static void traceStack() {
         : "%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi",
         "%r8", "%r9", "%r10", "%r11", "%r12",
         "%r13", "%r14", "%r15");
+}
+
+static inline void CHECK_OLD_TO_NEW(SEXP x, SEXP y) {
+//  unsigned xgen = (x)->sxpinfo.gccls == 0 ? ptr2page(x)->gen : 0;
+//  unsigned ygen = (y)->sxpinfo.gccls == 0 ? ptr2page(y)->gen : 0;
+//  if (xgen > ygen)
+//    ptr2page(y)->info[ptr2idx(y)].mark = MARK_BLACK;
 }
 
