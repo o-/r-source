@@ -82,7 +82,9 @@ static void R_ReplFile(FILE *fp, SEXP rho)
     int savestack;
 
     R_InitSrcRefState();
+    savestack = R_PPStackTop;
     for(;;) {
+	R_PPStackTop = savestack;
 	R_CurrentExpr = R_Parse1File(fp, 1, &status);
 	switch (status) {
 	case PARSE_NULL:
@@ -218,6 +220,7 @@ Rf_ReplIteration(SEXP rho, int savestack, int browselevel, R_ReplState *state)
 	    if(c == ';' || c == '\n') break;
     }
 
+    R_PPStackTop = savestack;
     R_CurrentExpr = R_Parse1Buffer(&R_ConsoleIob, 0, &state->status);
 
     switch(state->status) {
@@ -368,6 +371,7 @@ int R_ReplDLLdo1(void)
 	R_IoBufferPutc(c, &R_ConsoleIob);
 	if(c == ';' || c == '\n') break;
     }
+    R_PPStackTop = 0;
     R_CurrentExpr = R_Parse1Buffer(&R_ConsoleIob, 0, &status);
 
     switch(status) {
@@ -1223,6 +1227,7 @@ SEXP attribute_hidden do_browser(SEXP call, SEXP op, SEXP args, SEXP rho)
     /* so that it can be restored on exit. */
 
     browselevel = countContexts(CTXT_BROWSER, 1);
+    savestack = R_PPStackTop;
     PROTECT(topExp = R_CurrentExpr);
     saveToplevelContext = R_ToplevelContext;
     saveGlobalContext = R_GlobalContext;
@@ -1272,6 +1277,7 @@ SEXP attribute_hidden do_browser(SEXP call, SEXP op, SEXP args, SEXP rho)
 
     R_CurrentExpr = topExp;
     UNPROTECT(1);
+    R_PPStackTop = savestack;
     UNPROTECT(1);
     R_CurrentExpr = topExp;
     R_ToplevelContext = saveToplevelContext;

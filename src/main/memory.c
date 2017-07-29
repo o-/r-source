@@ -427,6 +427,7 @@ void attribute_hidden R_SetMaxNSize(R_size_t size)
 
 void attribute_hidden R_SetPPSize(R_size_t size)
 {
+    R_PPStackSize = (int) size;
 }
 
 /* Miscellaneous Globals. */
@@ -466,8 +467,6 @@ static int NodeClassSize[NUM_SMALL_NODE_CLASSES] = { 0, 1, 2, 4, 8, 16 };
 #define SET_NODE_CLASS(s,v) (((s)->sxpinfo.gccls) = (v))
 
 /* Node Allocation. */
-
-#define GET_FREE_NODE(s) (s) = allocInBucket(CONS_BUCKET)
 
 /* Debugging Routines. */
 
@@ -848,6 +847,7 @@ static Rboolean RunFinalizers(void)
 			 R_BaseEnv, R_NilValue, R_NilValue);
 	    saveToplevelContext = R_ToplevelContext;
 	    PROTECT(topExp = R_CurrentExpr);
+	    savestack = R_PPStackTop;
 	    /* The value of 'next' is protected to make it safe
 	       for this routine to be called recursively from a
 	       gc triggered by a finalizer. */
@@ -868,6 +868,7 @@ static Rboolean RunFinalizers(void)
 	    endcontext(&thiscontext);
 	    UNPROTECT(1); /* next */
 	    R_ToplevelContext = saveToplevelContext;
+	    R_PPStackTop = savestack;
 	    R_CurrentExpr = topExp;
 	    UNPROTECT(1);
 	}
@@ -1008,6 +1009,9 @@ static void traceHeap()
     }
 
     FORWARD_NODE(R_PreciousList);
+
+    for (i = 0; i < R_PPStackTop; i++)	   /* Protected pointers */
+	FORWARD_NODE(R_PPStack[i]);
 
     FORWARD_NODE(R_VStack);		   /* R_alloc stack */
 
@@ -1217,6 +1221,9 @@ static void NORET mem_err_malloc(R_size_t size)
 /* InitMemory : Initialise the memory to be used in R. */
 /* This includes: stack space, node space and vector space */
 
+#define PP_REDZONE_SIZE 1000L
+static int R_StandardPPStackSize, R_RealPPStackSize;
+
 void attribute_hidden InitMemory()
 {
     new_gc_initHeap();
@@ -1227,6 +1234,14 @@ void attribute_hidden InitMemory()
     init_gc_grow_settings();
 
     gc_reporting = R_Verbose;
+    R_StandardPPStackSize = R_PPStackSize;
+    R_RealPPStackSize = R_PPStackSize + PP_REDZONE_SIZE;
+    if (!(R_PPStack = (SEXP *) malloc(R_RealPPStackSize * sizeof(SEXP))))
+	R_Suicide("couldn't allocate memory for pointer stack");
+    R_PPStackTop = 0;
+#if VALGRIND_LEVEL > 1
+    VALGRIND_MAKE_MEM_NOACCESS(R_PPStack+R_PPStackSize, PP_REDZONE_SIZE);
+#endif
     vsfac = sizeof(VECREC);
     R_VSize = (R_VSize + 1)/vsfac;
     if (R_MaxVSize < R_SIZE_T_MAX) R_MaxVSize = (R_MaxVSize + 1)/vsfac;
@@ -1386,7 +1401,7 @@ char *S_realloc(char *p, long new, long old, int size)
 SEXP allocSExp(SEXPTYPE t)
 {
     SEXP s;
-    GET_FREE_NODE(s);
+    ALLOC_SEXP(s, t);
     INIT_REFCNT(s);
     SET_TYPEOF(s, t);
     CAR(s) = R_NilValue;
@@ -1399,7 +1414,7 @@ SEXP allocSExp(SEXPTYPE t)
 static SEXP allocSExpNonCons(SEXPTYPE t)
 {
     SEXP s;
-    GET_FREE_NODE(s);
+    ALLOC_SEXP(s, t);
     INIT_REFCNT(s);
     SET_TYPEOF(s, t);
     TAG(s) = R_NilValue;
@@ -1412,7 +1427,7 @@ static SEXP allocSExpNonCons(SEXPTYPE t)
 SEXP cons(SEXP car, SEXP cdr)
 {
     SEXP s;
-    GET_FREE_NODE(s);
+    ALLOC_CONS(s, car, cdr);
 
     INIT_REFCNT(s);
     SET_TYPEOF(s, LISTSXP);
@@ -1426,7 +1441,7 @@ SEXP cons(SEXP car, SEXP cdr)
 SEXP CONS_NR(SEXP car, SEXP cdr)
 {
     SEXP s;
-    GET_FREE_NODE(s);
+    ALLOC_CONS(s, car, cdr);
 
     INIT_REFCNT(s);
     DISABLE_REFCNT(s);
@@ -1460,7 +1475,7 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 {
     SEXP v, n, newrho;
 
-    GET_FREE_NODE(newrho);
+    ALLOC_ENV(newrho, namelist, valuelist, rho);
 
     INIT_REFCNT(newrho);
     SET_TYPEOF(newrho, ENVSXP);
@@ -1484,7 +1499,7 @@ SEXP NewEnvironment(SEXP namelist, SEXP valuelist, SEXP rho)
 SEXP attribute_hidden mkPROMISE(SEXP expr, SEXP rho)
 {
     SEXP s;
-    GET_FREE_NODE(s);
+    ALLOC_PROM(s, expr, rho);
 
     /* precaution to ensure code does not get modified via
        substitute() and the like */
@@ -1707,21 +1722,40 @@ SEXP attribute_hidden do_memoryprofile(SEXP call, SEXP op, SEXP args, SEXP env)
 
 static void reset_pp_stack(void *data)
 {
+    int *poldpps = data;
+    R_PPStackSize =  *poldpps;
 }
 
 void NORET R_signal_protect_error(void)
 {
-  errorcall(R_NilValue, "abort");
+    RCNTXT cntxt;
+    int oldpps = R_PPStackSize;
+
+    begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
+		 R_NilValue, R_NilValue);
+    cntxt.cend = &reset_pp_stack;
+    cntxt.cenddata = &oldpps;
+
+    if (R_PPStackSize < R_RealPPStackSize)
+	R_PPStackSize = R_RealPPStackSize;
+    errorcall(R_NilValue, _("protect(): protection stack overflow"));
+
+    endcontext(&cntxt); /* not reached */
 }
 
 void NORET R_signal_unprotect_error(void)
 {
-  errorcall(R_NilValue, "abort");
+    error(ngettext("unprotect(): only %d protected item",
+		   "unprotect(): only %d protected items", R_PPStackTop),
+	  R_PPStackTop);
 }
 
 #ifndef INLINE_PROTECT
 SEXP protect(SEXP s)
 {
+    if (R_PPStackTop >= R_PPStackSize)
+	R_signal_protect_error();
+    R_PPStack[R_PPStackTop++] = CHK(s);
     return s;
 }
 
@@ -1730,6 +1764,9 @@ SEXP protect(SEXP s)
 
 void unprotect(int l)
 {
+    if (R_PPStackTop >=  l)
+	R_PPStackTop -= l;
+    else R_signal_unprotect_error();
 }
 #endif
 
@@ -1737,30 +1774,79 @@ void unprotect(int l)
 
 void unprotect_ptr(SEXP s)
 {
+    int i = R_PPStackTop;
+
+    /* go look for  s  in  R_PPStack */
+    /* (should be among the top few items) */
+    do {
+	if (i == 0)
+	    error(_("unprotect_ptr: pointer not found"));
+    } while ( R_PPStack[--i] != s );
+
+    /* OK, got it, and  i  is indexing its location */
+    /* Now drop stack above it, if any */
+
+    while (++i < R_PPStackTop) R_PPStack[i - 1] = R_PPStack[i];
+
+    R_PPStackTop--;
 }
 
 /* Debugging function:  is s protected? */
 
 int Rf_isProtected(SEXP s)
 {
-    return TRUE;
+    int i = R_PPStackTop;
+
+    /* go look for  s  in  R_PPStack */
+    do {
+	if (i == 0)
+	    return(i);
+    } while ( R_PPStack[--i] != s );
+
+    /* OK, got it, and  i  is indexing its location */
+    return(i);
 }
 
 
 #ifndef INLINE_PROTECT
 void R_ProtectWithIndex(SEXP s, PROTECT_INDEX *pi)
 {
+    protect(s);
+    *pi = R_PPStackTop - 1;
 }
 #endif
 
 void NORET R_signal_reprotect_error(PROTECT_INDEX i)
 {
-  errorcall(R_NilValue, "abort");
+    error(ngettext("R_Reprotect: only %d protected item, can't reprotect index %d",
+		   "R_Reprotect: only %d protected items, can't reprotect index %d",
+		   R_PPStackTop),
+	  R_PPStackTop, i);
 }
 
 #ifndef INLINE_PROTECT
 void R_Reprotect(SEXP s, PROTECT_INDEX i)
 {
+    if (i >= R_PPStackTop || i < 0)
+	R_signal_reprotect_error(i);
+    R_PPStack[i] = s;
+}
+#endif
+
+#ifdef UNUSED
+/* remove all objects from the protection stack from index i upwards
+   and return them in a vector. The order in the vector is from new
+   to old. */
+SEXP R_CollectFromIndex(PROTECT_INDEX i)
+{
+    SEXP res;
+    int top = R_PPStackTop, j = 0;
+    if (i > top) i = top;
+    res = protect(allocVector(VECSXP, top - i));
+    while (i < top)
+	SET_VECTOR_ELT(res, j++, R_PPStack[--top]);
+    R_PPStackTop = top; /* this includes the protect we used above */
+    return res;
 }
 #endif
 
@@ -1768,6 +1854,7 @@ void R_Reprotect(SEXP s, PROTECT_INDEX i)
 attribute_hidden
 void initStack(void)
 {
+    R_PPStackTop = 0;
 }
 
 

@@ -3676,12 +3676,14 @@ attribute_hidden
 SEXP R_Parse1File(FILE *fp, int gencode, ParseStatus *status)
 {
     int savestack;
+    savestack = R_PPStackTop;    
     ParseInit();
     ParseContextInit();
     GenerateCode = gencode;
     fp_parse = fp;
     ptr_getc = file_getc;
     R_Parse1(status);
+    R_PPStackTop = savestack;
     return R_CurrentExpr;
 }
 
@@ -3700,6 +3702,7 @@ SEXP R_Parse1Buffer(IoBuffer *buffer, int gencode, ParseStatus *status)
     int savestack;    
 
     R_InitSrcRefState();
+    savestack = R_PPStackTop;       
     if (gencode) {
     	keepSource = asLogical(GetOption1(install("keep.source")));
     	if (keepSource) {
@@ -3736,6 +3739,7 @@ SEXP R_Parse1Buffer(IoBuffer *buffer, int gencode, ParseStatus *status)
 	    UNPROTECT(1);
 	}
     }
+    R_PPStackTop = savestack;
     R_FinalizeSrcRefState();
     return R_CurrentExpr;
 }
@@ -3754,6 +3758,7 @@ static SEXP R_Parse(int n, ParseStatus *status, SEXP srcfile)
     SEXP t, rval;
 
     R_InitSrcRefState();
+    savestack = R_PPStackTop;
     
     ParseContextInit();
     PROTECT(t = NewList());
@@ -3781,6 +3786,7 @@ static SEXP R_Parse(int n, ParseStatus *status, SEXP srcfile)
 	case PARSE_ERROR:
 	    if (ParseState.keepSrcRefs) 
 	        finalizeData();
+	    R_PPStackTop = savestack;
 	    R_FinalizeSrcRefState();	    
 	    return R_NilValue;
 	    break;
@@ -3800,6 +3806,7 @@ finish:
 	finalizeData();
 	rval = attachSrcrefs(rval);
     }
+    R_PPStackTop = savestack;    /* UNPROTECT lots! */
     R_FinalizeSrcRefState();
     *status = PARSE_OK;
     return rval;
@@ -3881,6 +3888,7 @@ SEXP R_ParseBuffer(IoBuffer *buffer, int n, ParseStatus *status, SEXP prompt,
     buf[0] = '\0';
     bufp = buf;
     R_InitSrcRefState();    
+    savestack = R_PPStackTop;
     PROTECT(t = NewList());
     
     GenerateCode = 1;
@@ -3925,6 +3933,7 @@ SEXP R_ParseBuffer(IoBuffer *buffer, int n, ParseStatus *status, SEXP prompt,
 	case PARSE_INCOMPLETE:
 	case PARSE_ERROR:
 	    R_IoBufferWriteReset(buffer);
+	    R_PPStackTop = savestack;
 	    R_FinalizeSrcRefState();
 	    return R_NilValue;
 	    break;
@@ -3943,6 +3952,7 @@ finish:
 	finalizeData();
 	rval = attachSrcrefs(rval);
     }
+    R_PPStackTop = savestack; /* UNPROTECT lots! */
     R_FinalizeSrcRefState();    
     *status = PARSE_OK;
     return rval;

@@ -679,6 +679,11 @@ extern0 SEXP	R_FreeSEXP;	    /* Cons cell free list */
 extern0 R_size_t R_Collected;	    /* Number of free cons cells (after gc) */
 extern0 int	R_Is_Running;	    /* for Windows memory manager */
 
+/* The Pointer Protection Stack */
+LibExtern int	R_PPStackSize	INI_as(R_PPSSIZE); /* The stack size (elements) */
+LibExtern int	R_PPStackTop;	    /* The top of the stack */
+LibExtern SEXP*	R_PPStack;	    /* The pointer protection stack */
+
 /* Evaluation Environment */
 extern0 SEXP	R_CurrentExpr;	    /* Currently evaluating expression */
 extern0 SEXP	R_ReturnedValue;    /* Slot for return-ing values */

@@ -164,6 +164,7 @@ void attribute_hidden R_run_onexits(RCNTXT *cptr)
 
 static void R_restore_globals(RCNTXT *cptr)
 {
+    R_PPStackTop = cptr->cstacktop;
     R_GCEnabled = cptr->gcenabled;
     R_BCIntActive = cptr->bcintactive;
     R_BCpc = cptr->bcpc;
@@ -244,6 +245,7 @@ void begincontext(RCNTXT * cptr, int flags,
 		  SEXP syscall, SEXP env, SEXP sysp,
 		  SEXP promargs, SEXP callfun)
 {
+    cptr->cstacktop = R_PPStackTop;
     cptr->gcenabled = R_GCEnabled;
     cptr->bcpc = R_BCpc;
     cptr->bcbody = R_BCbody;

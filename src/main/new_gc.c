@@ -155,10 +155,15 @@ static void Hashtable_occ(Hashtable* ht) {
   static Rboolean fullCollection = FALSE;
 
 #define CONS_BUCKET 0
-#define NUM_BUCKETS 17
-  static size_t BUCKET_SIZE[NUM_BUCKETS] = {40, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256, 320, 512};
-  static size_t INITIAL_PAGE_LIMIT[NUM_BUCKETS] = {1500, 400, 100, 100, 10, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 10, 20};
-  static size_t INITIAL_BIG_OBJ_LIMIT = 6 * 1024 * 1024;
+#define ENV_BUCKET 1
+#define PROM_BUCKET 2
+#define GENERIC_SEXP_BUCKET 3
+#define NUM_BUCKETS 20
+#define FIRST_GENERIC_BUCKET 4
+
+  static size_t BUCKET_SIZE[NUM_BUCKETS] = {40, 40, 40, 40, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256, 320, 512};
+  static size_t INITIAL_PAGE_LIMIT[NUM_BUCKETS] = {100, 30, 30, 50, 200, 50, 50, 10, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 10, 20};
+  static size_t INITIAL_BIG_OBJ_LIMIT = 256 * 1024 * 1024;
   static double PAGE_FULL_TRESHOLD = 0.04;
   static double GROW_RATE = 1.2;
 
@@ -488,7 +493,7 @@ static __attribute__ ((always_inline)) void* allocInBucket(unsigned bkt) {
 }
 
 SEXP alloc(size_t sz) {
-  unsigned bkt = 1;
+  unsigned bkt = FIRST_GENERIC_BUCKET;
   while (bkt < NUM_BUCKETS && BUCKET_SIZE[bkt] < sz) ++bkt;
   if (bkt < NUM_BUCKETS) {
     SEXP res = (SEXP)allocInBucket(bkt);
@@ -669,8 +674,44 @@ static double toMS(struct timespec* ts) {
 
 size_t marked = 0;
 
-void static doGc(unsigned bkt) {
+static SEXP intProtect[3] = {NULL, NULL, NULL};
+
+static void PROCESS_NODES();
+static void PUSH_NODE(SEXP);
+
+static Page* lastPage = NULL;
+static __attribute__ ((always_inline)) Rboolean markIfUnmarked(SEXP s) {
+  if (!ISBIG(s)) {
+    Page* p = PTR2PAGE(s);
+    CHECK(Hashtable_get(HEAP.pageHt, p));
+    size_t i = PTR2IDX(s);
+    CellInfo info = p->info[i];
+    CHECK(info.used == 1);
+    if (info.mark == MARK_WHITE) {
 #ifdef GCDEBUG
+      ++marked;
+#endif
+      if (p->live == 0)
+        p->live = 1;
+      info.mark = MARK_BLACK;
+      p->info[i] = info;
+      return TRUE;
+    }
+    return FALSE;
+  }
+
+  CHECK(Hashtable_get(HEAP.bigObjectsHt, s));
+  BigObject* o = PTR2BIG(s);
+  if (o->info.mark == MARK_WHITE) {
+    o->info.mark = MARK_BLACK;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+
+void static doGc(unsigned bkt) {
+#ifdef GCPROF
   struct timespec start;
   struct timespec end;
   marked = 0;
@@ -680,18 +721,23 @@ void static doGc(unsigned bkt) {
   finish_sweep();
   double p_before = pressure(bkt);
 
-  PTR2PAGE(R_NilValue)->info[PTR2IDX(R_NilValue)].mark = MARK_BLACK;
+  markIfUnmarked(R_NilValue);
   PROCESS_NODE(R_NilValue);
+  if (intProtect[0]) {PUSH_NODE(intProtect[0]); intProtect[0] = NULL;}
+  if (intProtect[1]) {PUSH_NODE(intProtect[1]); intProtect[1] = NULL;}
+  if (intProtect[2]) {PUSH_NODE(intProtect[2]); intProtect[2] = NULL;}
 
-  traceStack();
+  // traceStack();
   traceHeap();
   CHECK(MSpos == 0);
 
   free_unused_memory();
 
   gc_cnt++;
-//  if (gc_cnt % 10 == 0)
-//     heapStatistics();
+#if GCPROF
+  if (gc_cnt % 50 == 0)
+    heapStatistics();
+#endif
 
   double p_after = pressure(bkt);
   double relief = p_before-p_after;
@@ -709,7 +755,7 @@ void static doGc(unsigned bkt) {
 
   sweep_large_obj();
 
-#ifdef GCDEBUG
+#ifdef GCPROF
   clock_gettime(CLOCK_MONOTONIC, &end);
   printf("Gc %d (%d) of gen %d took %f to mark %d\n", gc_cnt, bkt, didfullCollection, toMS(&end)-toMS(&start), marked);
 #endif
@@ -830,36 +876,6 @@ static void sweep_large_obj() {
   }
 }
 
-static Page* lastPage = NULL;
-static __attribute__ ((always_inline)) Rboolean markIfUnmarked(SEXP s) {
-  if (!ISBIG(s)) {
-    Page* p = PTR2PAGE(s);
-    CHECK(Hashtable_get(HEAP.pageHt, p));
-    size_t i = PTR2IDX(s);
-    CellInfo info = p->info[i];
-    CHECK(info.used == 1);
-    if (info.mark == MARK_WHITE) {
-#ifdef GCDEBUG
-      ++marked;
-#endif
-      if (p->live == 0)
-        p->live = 1;
-      info.mark = MARK_BLACK;
-      p->info[i] = info;
-      return TRUE;
-    }
-    return FALSE;
-  }
-
-  CHECK(Hashtable_get(HEAP.bigObjectsHt, s));
-  BigObject* o = PTR2BIG(s);
-  if (o->info.mark == MARK_WHITE) {
-    o->info.mark = MARK_BLACK;
-    return TRUE;
-  }
-  return FALSE;
-}
-
 # define HAS_GENUINE_ATTRIB(x) \
     (ATTRIB(x) != R_NilValue && \
      (TYPEOF(x) != CHARSXP || TYPEOF(ATTRIB(x)) != CHARSXP))
@@ -867,9 +883,6 @@ static __attribute__ ((always_inline)) Rboolean markIfUnmarked(SEXP s) {
 static inline Rboolean NODE_IS_MARKED(SEXP s) {
   return ISMARKED(s);
 }
-
-static void PROCESS_NODES();
-static void PUSH_NODE(SEXP);
 
 static inline void FORWARD_NODE(SEXP s) {
   if (s == NULL || s == R_NilValue) return;
@@ -1008,3 +1021,29 @@ static __attribute__ ((always_inline)) void CHECK_OLD_TO_NEW(SEXP x, SEXP y) {
   }
 }
 
+#define GET_FREE_NODE(s) do { \
+  (s) = allocInBucket(GENERIC_SEXP_BUCKET); \
+} while(0)
+
+#define ALLOC_SEXP(s, t) do { \
+  (s) = allocInBucket(GENERIC_SEXP_BUCKET); \
+} while(0)
+
+#define ALLOC_CONS(s, p1, p2) do { \
+  intProtect[0] = (p1); \
+  intProtect[1] = (p2); \
+  (s) = allocInBucket(CONS_BUCKET); \
+} while(0)
+
+#define ALLOC_ENV(s, p1, p2, p3) do { \
+  intProtect[0] = (p1); \
+  intProtect[1] = (p2); \
+  intProtect[2] = (p3); \
+  (s) = allocInBucket(ENV_BUCKET); \
+} while(0)
+
+#define ALLOC_PROM(s, p1, p2) do { \
+  intProtect[0] = (p1); \
+  intProtect[1] = (p2); \
+  (s) = allocInBucket(PROM_BUCKET); \
+} while(0)
