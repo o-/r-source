@@ -92,8 +92,8 @@ static uint32_t Hashtable_h(void* k) {
   a = (a ^ 61) ^ (a >> 16);
   a = a + (a << 3);
   a = a ^ (a >> 4);
-  //a = a * 0x27d4eb2d;
-  //a = a ^ (a >> 15);
+  a = a * 0x27d4eb2d;
+  a = a ^ (a >> 15);
   return a;
 }
 
@@ -183,15 +183,15 @@ static size_t gc_cnt = 0;
 static Rboolean fullCollection = FALSE;
 
 #define CONS_BUCKET 0
-#define ENV_BUCKET 1
-#define PROM_BUCKET 2
-#define GENERIC_SEXP_BUCKET 3
-#define NUM_BUCKETS 23
-#define FIRST_GENERIC_BUCKET 4
+#define ENV_BUCKET 0
+#define PROM_BUCKET 1
+#define GENERIC_SEXP_BUCKET 2
+#define NUM_BUCKETS 21
+#define FIRST_GENERIC_BUCKET 3
 
-static size_t BUCKET_SIZE[NUM_BUCKETS] = {40, 40, 40, 40, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256, 320, 512, 768, 1024, 1290};
+static size_t BUCKET_SIZE[NUM_BUCKETS] = {40, 40, 40, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256, 320, 512, 768};
 static size_t INITIAL_PAGE_LIMIT = 800;
-static size_t INITIAL_BIG_OBJ_LIMIT = 32 * 1024 * 1024;
+static size_t INITIAL_BIG_OBJ_LIMIT = 16 * 1024 * 1024;
 static double PAGE_FULL_TRESHOLD = 0.01;
 static double GROW_RATE = 1.15;
 #define HEAP_SLACK 0.78
@@ -219,7 +219,7 @@ typedef struct BigObject {
   uint8_t mark;
   struct BigObject* next;
   size_t size;
-  char data[];
+  SEXPREC data[];
 } BigObject;
 
 #define PTR2PAGE(ptr) ((Page*)((uintptr_t)(ptr) & ~PAGE_MASK))
@@ -229,6 +229,9 @@ typedef struct BigObject {
 #define ISMARKED(s) (ISNODE(s) \
     ? PTR2PAGE(s)->mark[PTR2IDX(s)] == THE_MARK \
     : PTR2BIG(s)->mark == THE_MARK)
+#define GETMARK(s) (ISNODE(s) \
+    ? PTR2PAGE(s)->mark[PTR2IDX(s)] \
+    : PTR2BIG(s)->mark)
 #define INIT_NODE(s) (*(uint32_t*)&((SEXP)(s))->sxpinfo = 0)
 
 static void doGc(unsigned);
@@ -299,6 +302,9 @@ static void* allocBigObj(size_t sexp_sz) {
 
   if (HEAP.bigObjectSize + sz > HEAP.bigObjectLimit)
     doGc(NUM_BUCKETS);
+
+  if (HEAP.bigObjectSize + sz > HEAP.bigObjectLimit)
+    HEAP.bigObjectLimit = (HEAP.bigObjectSize + sz) * HEAP_SLACK;
 
   void* data = malloc(sz);
   if (data == NULL)
@@ -468,7 +474,6 @@ static void* slowAllocInBucket(unsigned bkt) {
   }
 }
 
-#include <assert.h>
 static inline void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
   size_t sz = BUCKET_SIZE[bkt];
 
@@ -476,8 +481,7 @@ static inline void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
   while (bucket->to_sweep != NULL) {
     Page* page = bucket->to_sweep;
     // if bucket size idx aligned we can sweep faster...
-    if (sz % PAGE_IDX == 0) {
-      size_t d = sz/PAGE_IDX;
+    if (sz == PAGE_IDX) {
       size_t i = PTR2IDX(page->sweep_finger);
       size_t l = PTR2IDX(page->end);
       while (i < l) {
@@ -487,7 +491,7 @@ static inline void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
           page->reclaimed_nodes++;
           return res;
         }
-        i += d;
+        ++i;
       }
     } else {
       uintptr_t finger = page->sweep_finger;
@@ -718,10 +722,10 @@ size_t marked = 0;
 
 static SEXP intProtect[3] = {NULL, NULL, NULL};
 
-static void PROCESS_NODES();
+static inline void PROCESS_NODES();
 static void PUSH_NODE(SEXP);
 
-// #define GCPROF 1
+#define GCPROF 1
 
 static Page* lastPage = NULL;
 static inline __attribute__ ((always_inline)) Rboolean markIfUnmarked(SEXP s) {
@@ -737,6 +741,8 @@ static inline __attribute__ ((always_inline)) Rboolean markIfUnmarked(SEXP s) {
         p->last_mark = THE_MARK;
       }
       p->mark[i] = THE_MARK;
+      if (s->sxpinfo.old != 1)
+        s->sxpinfo.old = 1;
       return TRUE;
     }
     return FALSE;
@@ -745,6 +751,8 @@ static inline __attribute__ ((always_inline)) Rboolean markIfUnmarked(SEXP s) {
   BigObject* o = PTR2BIG(s);
   if (o->mark < THE_MARK) {
     o->mark = THE_MARK;
+    if (o->data[0].sxpinfo.old != 1)
+      o->data[0].sxpinfo.old = 1;
     return TRUE;
   }
   return FALSE;
@@ -881,11 +889,7 @@ static void free_unused_memory(unsigned bkt, Rboolean all) {
   }
 }
 
-# define HAS_GENUINE_ATTRIB(x) \
-    (ATTRIB(x) != R_NilValue && \
-     (TYPEOF(x) != CHARSXP || TYPEOF(ATTRIB(x)) != CHARSXP))
-
-static inline Rboolean NODE_IS_MARKED(SEXP s) {
+static inline __attribute__((always_inline))  Rboolean NODE_IS_MARKED(SEXP s) {
   return ISMARKED(s);
 }
 
@@ -897,11 +901,15 @@ static inline void FORWARD_NODE(SEXP s) {
   //PROCESS_NODES();
 }
 
-static inline void PROCESS_NODES() {
+static inline __attribute__((always_inline)) void PROCESS_NODES() {
   while (MSpos > 0) {
     MSEntry e = MarkStack[--MSpos];
     PROCESS_NODE(e.entry);
   }
+}
+
+static inline void SLOW_PROCESS_NODES() {
+  PROCESS_NODES();
 }
 
 static inline __attribute__((always_inline)) void PUSH_NODE(SEXP s) {
@@ -979,12 +987,18 @@ static inline __attribute__ ((always_inline)) void PROCESS_NODE(SEXP cur) {
 }
 
 #define CHECK_OLD_TO_NEW(x, y) \
-  if (!fullCollection) { \
-    if (ISMARKED(x) && !ISMARKED(y)) { \
-      PUSH_NODE(y); \
-      PROCESS_NODES(); \
-    } \
+  if (!fullCollection && ISMARKED(x) && !ISMARKED(y)) { \
+    PUSH_NODE(y); \
+    if (MSpos > 100) \
+      SLOW_PROCESS_NODES(); \
   }
+
+// #define CHECK_OLD_TO_NEW(x, y) \
+//   if (!fullCollection && (x)->sxpinfo.old && !(y)->sxpinfo.old) { \
+//     PUSH_NODE(y); \
+//     if (MSpos > 100) \
+//       SLOW_PROCESS_NODES(); \
+//   }
 
 #define GET_FREE_NODE(s) do { \
   (s) = allocInBucket(GENERIC_SEXP_BUCKET); \
