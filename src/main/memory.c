@@ -572,16 +572,6 @@ static void DEBUG_RELEASE_PRINT(int rel_pages, int maxrel_pages, int i)
 #define DEBUG_RELEASE_PRINT(rel_pages, maxrel_pages, i)
 #endif /* DEBUG_RELEASE_MEM */
 
-#ifdef COMPUTE_REFCNT_VALUES
-#define INIT_REFCNT(x) do {			\
-	SEXP __x__ = (x);			\
-	SET_REFCNT(__x__, 0);			\
-	SET_TRACKREFS(__x__, TRUE);		\
-    } while (0)
-#else
-#define INIT_REFCNT(x) do {} while (0)
-#endif
-
 /* compute size in VEC units so result will fit in LENGTH field for FREESXPs */
 static R_INLINE R_size_t getVecSizeInVEC(SEXP s)
 {
@@ -1198,7 +1188,24 @@ void attribute_hidden get_current_mem(size_t *smallvsize,
 
 SEXP attribute_hidden do_gc(SEXP call, SEXP op, SEXP args, SEXP rho)
 {
-    return R_NilValue;
+    SEXP value;
+    PROTECT(value = allocVector(REALSXP, 14));
+    REAL(value)[0] = 0;
+    REAL(value)[1] = 0;
+    REAL(value)[4] = 0;
+    REAL(value)[5] = 0;
+    REAL(value)[2] = 0;
+    REAL(value)[3] = 0;
+    REAL(value)[6] = 0;
+    REAL(value)[7] = 0;
+    REAL(value)[8] = 0;
+    REAL(value)[9] = 0;
+    REAL(value)[10] = 0;
+    REAL(value)[11] = 0;
+    REAL(value)[12] = 0;
+    REAL(value)[13] = 0;
+    UNPROTECT(1);
+    return value;
 }
 
 
@@ -1959,15 +1966,15 @@ void R_SetExternalPtrAddr(SEXP s, void *p)
 void R_SetExternalPtrTag(SEXP s, SEXP tag)
 {
     FIX_REFCNT(s, EXTPTR_TAG(s), tag);
-    CHECK_OLD_TO_NEW(s, tag);
     EXTPTR_TAG(s) = tag;
+    WRITE_BARRIER(s, tag);
 }
 
 void R_SetExternalPtrProtected(SEXP s, SEXP p)
 {
     FIX_REFCNT(s, EXTPTR_PROT(s), p);
-    CHECK_OLD_TO_NEW(s, p);
     EXTPTR_PROT(s) = p;
+    WRITE_BARRIER(s, p);
 }
 
 /*
@@ -2015,8 +2022,8 @@ void (SET_ATTRIB)(SEXP x, SEXP v) {
 	error("value of 'SET_ATTRIB' must be a pairlist or NULL, not a '%s'",
 	      type2char(TYPEOF(x)));
     FIX_REFCNT(x, ATTRIB(x), v);
-    CHECK_OLD_TO_NEW(x, v);
     ATTRIB(x) = v;
+    ATTRIB_WRITE_BARRIER(x, v);
 }
 void (SET_OBJECT)(SEXP x, int v) { SET_OBJECT(CHK(x), v); }
 void (SET_TYPEOF)(SEXP x, int v) { SET_TYPEOF(CHK(x), v); }
@@ -2152,8 +2159,8 @@ void (SET_STRING_ELT)(SEXP x, R_xlen_t i, SEXP v) {
 	error(_("attempt to set index %lu/%lu in SET_STRING_ELT"),
 	      i, XLENGTH(x));
     FIX_REFCNT(x, STRING_ELT(x, i), v);
-    CHECK_OLD_TO_NEW(x, v);
     STRING_ELT(x, i) = v;
+    WRITE_BARRIER(x, v);
 }
 
 SEXP (SET_VECTOR_ELT)(SEXP x, R_xlen_t i, SEXP v) {
@@ -2168,8 +2175,9 @@ SEXP (SET_VECTOR_ELT)(SEXP x, R_xlen_t i, SEXP v) {
 	error(_("attempt to set index %lu/%lu in SET_VECTOR_ELT"),
 	      i, XLENGTH(x));
     FIX_REFCNT(x, VECTOR_ELT(x, i), v);
-    CHECK_OLD_TO_NEW(x, v);
-    return VECTOR_ELT(x, i) = v;
+    SEXP res = VECTOR_ELT(x, i) = v;
+    WRITE_BARRIER(x, v);
+    return res;
 }
 
 
@@ -2187,15 +2195,15 @@ SEXP (CADDDR)(SEXP e) { return CHK(CADDDR(CHK(e))); }
 SEXP (CAD4R)(SEXP e) { return CHK(CAD4R(CHK(e))); }
 int (MISSING)(SEXP x) { return MISSING(CHK(x)); }
 
-void (SET_TAG)(SEXP x, SEXP v) { FIX_REFCNT(x, TAG(x), v); CHECK_OLD_TO_NEW(x, v); TAG(x) = v; }
+void (SET_TAG)(SEXP x, SEXP v) { FIX_REFCNT(x, TAG(x), v); TAG(x) = v; WRITE_BARRIER(x, v); }
 
 SEXP (SETCAR)(SEXP x, SEXP y)
 {
     if (x == NULL || x == R_NilValue)
 	error(_("bad value"));
     FIX_REFCNT(x, CAR(x), y);
-    CHECK_OLD_TO_NEW(x, y);
     CAR(x) = y;
+    WRITE_BARRIER(x, y);
     return y;
 }
 
@@ -2204,8 +2212,8 @@ SEXP (SETCDR)(SEXP x, SEXP y)
     if (x == NULL || x == R_NilValue)
 	error(_("bad value"));
     FIX_REFCNT(x, CDR(x), y);
-    CHECK_OLD_TO_NEW(x, y);
     CDR(x) = y;
+    WRITE_BARRIER(x, y);
     return y;
 }
 
@@ -2217,8 +2225,8 @@ SEXP (SETCADR)(SEXP x, SEXP y)
 	error(_("bad value"));
     cell = CDR(x);
     FIX_REFCNT(cell, CAR(cell), y);
-    CHECK_OLD_TO_NEW(cell, y);
     CAR(cell) = y;
+    WRITE_BARRIER(cell, y);
     return y;
 }
 
@@ -2231,8 +2239,8 @@ SEXP (SETCADDR)(SEXP x, SEXP y)
 	error(_("bad value"));
     cell = CDDR(x);
     FIX_REFCNT(cell, CAR(cell), y);
-    CHECK_OLD_TO_NEW(cell, y);
     CAR(cell) = y;
+    WRITE_BARRIER(cell, y);
     return y;
 }
 
@@ -2246,8 +2254,8 @@ SEXP (SETCADDDR)(SEXP x, SEXP y)
 	error(_("bad value"));
     cell = CDDDR(x);
     FIX_REFCNT(cell, CAR(cell), y);
-    CHECK_OLD_TO_NEW(cell, y);
     CAR(cell) = y;
+    WRITE_BARRIER(cell, y);
     return y;
 }
 
@@ -2264,8 +2272,8 @@ SEXP (SETCAD4R)(SEXP x, SEXP y)
 	error(_("bad value"));
     cell = CD4R(x);
     FIX_REFCNT(cell, CAR(cell), y);
-    CHECK_OLD_TO_NEW(cell, y);
     CAR(cell) = y;
+    WRITE_BARRIER(cell, y);
     return y;
 }
 
@@ -2278,9 +2286,9 @@ SEXP (CLOENV)(SEXP x) { return CHK(CLOENV(CHK(x))); }
 int (RDEBUG)(SEXP x) { return RDEBUG(CHK(x)); }
 int (RSTEP)(SEXP x) { return RSTEP(CHK(x)); }
 
-void (SET_FORMALS)(SEXP x, SEXP v) { FIX_REFCNT(x, FORMALS(x), v); CHECK_OLD_TO_NEW(x, v); FORMALS(x) = v; }
-void (SET_BODY)(SEXP x, SEXP v) { FIX_REFCNT(x, BODY(x), v); CHECK_OLD_TO_NEW(x, v); BODY(x) = v; }
-void (SET_CLOENV)(SEXP x, SEXP v) { FIX_REFCNT(x, CLOENV(x), v); CHECK_OLD_TO_NEW(x, v); CLOENV(x) = v; }
+void (SET_FORMALS)(SEXP x, SEXP v) { FIX_REFCNT(x, FORMALS(x), v); FORMALS(x) = v; WRITE_BARRIER(x, v); }
+void (SET_BODY)(SEXP x, SEXP v) { FIX_REFCNT(x, BODY(x), v); BODY(x) = v; WRITE_BARRIER(x, v); }
+void (SET_CLOENV)(SEXP x, SEXP v) { FIX_REFCNT(x, CLOENV(x), v); CLOENV(x) = v; WRITE_BARRIER(x, v); }
 void (SET_RDEBUG)(SEXP x, int v) { SET_RDEBUG(CHK(x), v); }
 void (SET_RSTEP)(SEXP x, int v) { SET_RSTEP(CHK(x), v); }
 
@@ -2299,9 +2307,9 @@ SEXP (SYMVALUE)(SEXP x) { return CHK(SYMVALUE(CHK(x))); }
 SEXP (INTERNAL)(SEXP x) { return CHK(INTERNAL(CHK(x))); }
 int (DDVAL)(SEXP x) { return DDVAL(CHK(x)); }
 
-void (SET_PRINTNAME)(SEXP x, SEXP v) { FIX_REFCNT(x, PRINTNAME(x), v); CHECK_OLD_TO_NEW(x, v); PRINTNAME(x) = v; }
-void (SET_SYMVALUE)(SEXP x, SEXP v) { FIX_REFCNT(x, SYMVALUE(x), v); CHECK_OLD_TO_NEW(x, v); SYMVALUE(x) = v; }
-void (SET_INTERNAL)(SEXP x, SEXP v) { FIX_REFCNT(x, INTERNAL(x), v); CHECK_OLD_TO_NEW(x, v); INTERNAL(x) = v; }
+void (SET_PRINTNAME)(SEXP x, SEXP v) { FIX_REFCNT(x, PRINTNAME(x), v); PRINTNAME(x) = v; WRITE_BARRIER(x, v); }
+void (SET_SYMVALUE)(SEXP x, SEXP v) { FIX_REFCNT(x, SYMVALUE(x), v); SYMVALUE(x) = v; WRITE_BARRIER(x, v); }
+void (SET_INTERNAL)(SEXP x, SEXP v) { FIX_REFCNT(x, INTERNAL(x), v); INTERNAL(x) = v; WRITE_BARRIER(x, v); }
 void (SET_DDVAL)(SEXP x, int v) { SET_DDVAL(CHK(x), v); }
 
 /* Environment Accessors */
@@ -2310,9 +2318,9 @@ SEXP (ENCLOS)(SEXP x) { return CHK(ENCLOS(CHK(x))); }
 SEXP (HASHTAB)(SEXP x) { return CHK(HASHTAB(CHK(x))); }
 int (ENVFLAGS)(SEXP x) { return ENVFLAGS(CHK(x)); }
 
-void (SET_FRAME)(SEXP x, SEXP v) { FIX_REFCNT(x, FRAME(x), v); CHECK_OLD_TO_NEW(x, v); FRAME(x) = v; }
-void (SET_ENCLOS)(SEXP x, SEXP v) { FIX_REFCNT(x, ENCLOS(x), v); CHECK_OLD_TO_NEW(x, v); ENCLOS(x) = v; }
-void (SET_HASHTAB)(SEXP x, SEXP v) { FIX_REFCNT(x, HASHTAB(x), v); CHECK_OLD_TO_NEW(x, v); HASHTAB(x) = v; }
+void (SET_FRAME)(SEXP x, SEXP v) { FIX_REFCNT(x, FRAME(x), v); FRAME(x) = v; WRITE_BARRIER(x, v); }
+void (SET_ENCLOS)(SEXP x, SEXP v) { FIX_REFCNT(x, ENCLOS(x), v); ENCLOS(x) = v; WRITE_BARRIER(x, v); }
+void (SET_HASHTAB)(SEXP x, SEXP v) { FIX_REFCNT(x, HASHTAB(x), v); HASHTAB(x) = v; WRITE_BARRIER(x, v); }
 void (SET_ENVFLAGS)(SEXP x, int v) { SET_ENVFLAGS(x, v); }
 
 /* Promise Accessors */
@@ -2321,9 +2329,9 @@ SEXP (PRENV)(SEXP x) { return CHK(PRENV(CHK(x))); }
 SEXP (PRVALUE)(SEXP x) { return CHK(PRVALUE(CHK(x))); }
 int (PRSEEN)(SEXP x) { return PRSEEN(CHK(x)); }
 
-void (SET_PRENV)(SEXP x, SEXP v){ FIX_REFCNT(x, PRENV(x), v); CHECK_OLD_TO_NEW(x, v); PRENV(x) = v; }
-void (SET_PRVALUE)(SEXP x, SEXP v) { FIX_REFCNT(x, PRVALUE(x), v); CHECK_OLD_TO_NEW(x, v); PRVALUE(x) = v; }
-void (SET_PRCODE)(SEXP x, SEXP v) { FIX_REFCNT(x, PRCODE(x), v); CHECK_OLD_TO_NEW(x, v); PRCODE(x) = v; }
+void (SET_PRENV)(SEXP x, SEXP v){ FIX_REFCNT(x, PRENV(x), v); PRENV(x) = v; WRITE_BARRIER(x, v); }
+void (SET_PRVALUE)(SEXP x, SEXP v) { FIX_REFCNT(x, PRVALUE(x), v); PRVALUE(x) = v; WRITE_BARRIER(x, v); }
+void (SET_PRCODE)(SEXP x, SEXP v) { FIX_REFCNT(x, PRCODE(x), v); PRCODE(x) = v; WRITE_BARRIER(x, v); }
 void (SET_PRSEEN)(SEXP x, int v) { SET_PRSEEN(CHK(x), v); }
 
 /* Hashing Accessors */
@@ -2346,8 +2354,8 @@ SEXP (SET_CXTAIL)(SEXP x, SEXP v) {
 	error("value of 'SET_CXTAIL' must be a char or NULL, not a '%s'",
 	      type2char(TYPEOF(v)));
 #endif
-    /*CHECK_OLD_TO_NEW(x, v); *//* not needed since not properly traced */
     ATTRIB(x) = v;
+    /*WRITE_BARRIER(x, v); *//* not needed since not properly traced */
     return x;
 }
 
