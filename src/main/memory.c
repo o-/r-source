@@ -1000,8 +1000,10 @@ static void traceHeap()
 
     FORWARD_NODE(R_PreciousList);
 
+#ifndef CONSERVATIVE_STACK_SCAN
     for (i = 0; i < R_PPStackTop; i++)	   /* Protected pointers */
 	FORWARD_NODE(R_PPStack[i]);
+#endif
 
     FORWARD_NODE(R_VStack);		   /* R_alloc stack */
 
@@ -1760,9 +1762,11 @@ void NORET R_signal_unprotect_error(void)
 #ifndef INLINE_PROTECT
 SEXP protect(SEXP s)
 {
+#ifndef CONSERVATIVE_STACK_SCAN
     if (R_PPStackTop >= R_PPStackSize)
 	R_signal_protect_error();
     R_PPStack[R_PPStackTop++] = CHK(s);
+#endif
     return s;
 }
 
@@ -1771,9 +1775,11 @@ SEXP protect(SEXP s)
 
 void unprotect(int l)
 {
+#ifndef CONSERVATIVE_STACK_SCAN
     if (R_PPStackTop >=  l)
 	R_PPStackTop -= l;
     else R_signal_unprotect_error();
+#endif
 }
 #endif
 
@@ -1781,6 +1787,7 @@ void unprotect(int l)
 
 void unprotect_ptr(SEXP s)
 {
+#ifndef CONSERVATIVE_STACK_SCAN
     int i = R_PPStackTop;
 
     /* go look for  s  in  R_PPStack */
@@ -1796,12 +1803,14 @@ void unprotect_ptr(SEXP s)
     while (++i < R_PPStackTop) R_PPStack[i - 1] = R_PPStack[i];
 
     R_PPStackTop--;
+#endif
 }
 
 /* Debugging function:  is s protected? */
 
 int Rf_isProtected(SEXP s)
 {
+#ifndef CONSERVATIVE_STACK_SCAN
     int i = R_PPStackTop;
 
     /* go look for  s  in  R_PPStack */
@@ -1812,14 +1821,19 @@ int Rf_isProtected(SEXP s)
 
     /* OK, got it, and  i  is indexing its location */
     return(i);
+#else
+    return TRUE;
+#endif
 }
 
 
 #ifndef INLINE_PROTECT
 void R_ProtectWithIndex(SEXP s, PROTECT_INDEX *pi)
 {
+#ifndef CONSERVATIVE_STACK_SCAN
     protect(s);
     *pi = R_PPStackTop - 1;
+#endif
 }
 #endif
 
@@ -1834,9 +1848,11 @@ void NORET R_signal_reprotect_error(PROTECT_INDEX i)
 #ifndef INLINE_PROTECT
 void R_Reprotect(SEXP s, PROTECT_INDEX i)
 {
+#ifndef CONSERVATIVE_STACK_SCAN
     if (i >= R_PPStackTop || i < 0)
 	R_signal_reprotect_error(i);
     R_PPStack[i] = s;
+#endif
 }
 #endif
 

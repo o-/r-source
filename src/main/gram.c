@@ -628,7 +628,9 @@ YYID (yyi)
 
 /* The parser invokes alloca or malloc; define the necessary symbols.  */
 
+#ifdef CONSERVATIVE_STACK_SCAN
 #define YYSTACK_USE_ALLOCA 1
+#endif
 
 # ifdef YYSTACK_USE_ALLOCA
 #  if YYSTACK_USE_ALLOCA
