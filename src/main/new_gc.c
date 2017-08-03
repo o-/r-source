@@ -532,7 +532,7 @@ inline void* sweepAllocInBucketCellAligned(unsigned bkt, SizeBucket* bucket, siz
     size_t l = PTR2IDX(page->sweep_end - PAGE_IDX) + 1;
     CHECK(IDX2PTR(page, PTR2IDX(page->start)) == page->start);
     CHECK(IDX2PTR(page, i) == page->sweep_finger);
-    CHECK(IDX2PTR(page, i + d) == page->sweep_finger + sz);
+    CHECK(IDX2PTR(page, i + cells) == page->sweep_finger + sz);
     CHECK(IDX2PTR(page, l) == page->sweep_end);
     for (; i < l; i += cells) {
       if (page->mark[i] < THE_MARK) {
