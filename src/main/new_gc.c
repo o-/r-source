@@ -33,8 +33,12 @@
 #define PAGE_MASK 0x1fff
 #define MAX_IDX (PAGE_SIZE / PAGE_IDX)
 
+#define FORCE_INLINE inline __attribute__((always_inline))
+
 // #define GCPROF 1
 // #define GCDEBUG
+
+// #define CONSERVATIVE_STACK_SCAN
 
 #ifdef GCDEBUG
 #define CHECK(exp)                \
@@ -50,54 +54,58 @@
   {}
 #endif
 
+// ===============================================================================
+
+#define HASH_BUCKET_SIZE 8
+#define HASH_TABLE_INIT_SIZE (1024/HASH_BUCKET_SIZE)
+
 struct Page;
-typedef struct HashtableEntry {
+
+typedef struct PageHashtableEntry {
   struct Page* page;
-  uint8_t mark;
-} HashtableEntry;
+  uint8_t last_mark;
+  uint8_t to_sweep : 1;
+  uint8_t full     : 1;
+} PageHashtableEntry;
 
-typedef struct Hashtable {
+typedef struct PageHashtable {
   size_t size;
-  size_t bucket_size;
-  HashtableEntry data[];
-} Hashtable;
+  PageHashtableEntry data[];
+} PageHashtable;
 
-void Hashtable_init(Hashtable** ht) {
+void PageHashtable_init(PageHashtable** ht) {
   size_t size = 64;
-  size_t bucket_size = 16;
 
-  size_t sz = sizeof(Hashtable) + size * bucket_size * sizeof(HashtableEntry);
-  Hashtable* h = malloc(sz);
+  size_t sz = sizeof(PageHashtable) + size * HASH_BUCKET_SIZE * sizeof(PageHashtableEntry);
+  PageHashtable* h = malloc(sz);
   if (h == NULL)
     exit(1);
   memset(h, 0, sz);
   h->size = size;
-  h->bucket_size = bucket_size;
   *ht = h;
 }
 
-Rboolean Hashtable_add(Hashtable* ht, struct Page* p, uint8_t);
-void Hashtable_grow(Hashtable** ht) {
-  Hashtable* old = *ht;
+Rboolean PageHashtable_add(PageHashtable* ht, PageHashtableEntry);
+void PageHashtable_grow(PageHashtable** ht) {
+  PageHashtable* old = *ht;
   size_t size = old->size * 2;
   size_t sz =
-      sizeof(Hashtable) + size * old->bucket_size * sizeof(HashtableEntry);
-  Hashtable* h = malloc(sz);
+      sizeof(PageHashtable) + size * HASH_BUCKET_SIZE * sizeof(PageHashtableEntry);
+  PageHashtable* h = malloc(sz);
   if (h == NULL)
     exit(1);
   memset(h, 0, sz);
   h->size = size;
-  h->bucket_size = old->bucket_size;
-  size_t max = old->size * old->bucket_size;
+  size_t max = old->size * HASH_BUCKET_SIZE;
   for (size_t i = 0; i < max; ++i) {
     if (old->data[i].page != NULL)
-      Hashtable_add(h, old->data[i].page, old->data[i].mark);
+      PageHashtable_add(h, old->data[i]);
   }
   *ht = h;
   free(old);
 }
 
-inline uint32_t Hashtable_h(void* k) {
+FORCE_INLINE uint32_t PageHashtable_h(void* k) {
   uint32_t a = (uintptr_t)k >> PAGE_IDX_BITS;
   a = (a ^ 61) ^ (a >> 16);
   a = a + (a << 3);
@@ -107,68 +115,65 @@ inline uint32_t Hashtable_h(void* k) {
   return a;
 }
 
-void Hashtable_occ(Hashtable* ht);
-Rboolean Hashtable_add(Hashtable* ht, struct Page* p, uint8_t mark) {
-  long key = Hashtable_h(p);
-  long idx = ht->bucket_size * (key & (ht->size - 1));
+Rboolean PageHashtable_add(PageHashtable* ht, PageHashtableEntry e) {
+  long key = PageHashtable_h(e.page);
+  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
   long el = 0;
-  while (ht->data[idx + el].page != NULL && el < ht->bucket_size) {
-    if (ht->data[idx + el].page == p) {
+  while (ht->data[idx + el].page != NULL && el < HASH_BUCKET_SIZE) {
+    if (ht->data[idx + el].page == e.page) {
       R_Suicide("ht err 3");
     }
     ++el;
   }
-  if (el == ht->bucket_size) {
+  if (el == HASH_BUCKET_SIZE) {
     return FALSE;
   }
   CHECK(ht->data[idx + el].page == NULL);
-  CHECK(el >= 0 && el < ht->bucket_size);
-  HashtableEntry e = {p, mark};
+  CHECK(el >= 0 && el < HASH_BUCKET_SIZE);
   ht->data[idx + el] = e;
   return TRUE;
 }
 
-void Hashtable_set(Hashtable* ht, struct Page* p, uint8_t mark) {
-  long key = Hashtable_h(p);
-  long idx = ht->bucket_size * (key & (ht->size - 1));
+PageHashtableEntry* PageHashtable_get(PageHashtable* ht, struct Page* p) {
+  long key = PageHashtable_h(p);
+  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
   long el = 0;
-  while (ht->data[idx + el].page != NULL && el < ht->bucket_size) {
-    if (ht->data[idx + el].page == p) {
-      ht->data[idx + el].mark = mark;
-      return;
-    }
-    ++el;
-  }
-  R_Suicide("ht err2");
-}
-
-inline uint8_t Hashtable_get(Hashtable* ht, struct Page* p) {
-  long key = Hashtable_h(p);
-  long idx = ht->bucket_size * (key & (ht->size - 1));
-  long el = 0;
-  while (el < ht->bucket_size && ht->data[idx + el].page != NULL) {
+  while (el < HASH_BUCKET_SIZE && ht->data[idx + el].page != NULL) {
     if (ht->data[idx + el].page == p)
-      return ht->data[idx + el].mark;
+      return &ht->data[idx + el];
     ++el;
   }
   R_Suicide("ht err");
 }
 
-inline void Hashtable_remove_el(Hashtable* ht, size_t pos) {
+Rboolean PageHashtable_exists(PageHashtable* ht, struct Page* p) {
+  long key = PageHashtable_h(p);
+  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+  long el = 0;
+  while (el < HASH_BUCKET_SIZE && ht->data[idx + el].page != NULL) {
+    if (ht->data[idx + el].page == p)
+      return TRUE;
+    ++el;
+  }
+  return FALSE;
+}
+
+
+void PageHashtable_remove_el(PageHashtable* ht, size_t pos) {
   do {
     ht->data[pos] = ht->data[pos + 1];
     ++pos;
-  } while (pos % ht->bucket_size != 0);
+  } while (pos % HASH_BUCKET_SIZE != 0);
   ht->data[pos - 1].page = NULL;
 }
 
-void Hashtable_remove(Hashtable* ht, void* p) {
-  long key = Hashtable_h(p);
-  long idx = ht->bucket_size * (key & (ht->size - 1));
+void PageHashtable_remove(PageHashtable* ht, void* p) {
+  long key = PageHashtable_h(p);
+  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
   long el = 0;
-  while (el < ht->bucket_size) {
+  while (el < HASH_BUCKET_SIZE) {
     if (ht->data[idx + el].page == p) {
-      Hashtable_remove_el(ht, idx + el);
+      PageHashtable_remove_el(ht, idx + el);
       return;
     }
     el++;
@@ -176,14 +181,111 @@ void Hashtable_remove(Hashtable* ht, void* p) {
   CHECK(0);
 }
 
-void Hashtable_occ(Hashtable* ht) {
-  size_t used = 0;
-  for (size_t i = 0; i < ht->size * ht->bucket_size; ++i) {
-    if (ht->data[i].page != NULL)
-      ++used;
-  }
-  printf("HT usage: %f\n", (double)used / (double)(ht->size * ht->bucket_size));
+typedef SEXP ObjHashtableEntry;
+
+typedef struct ObjHashtable {
+  size_t size;
+  ObjHashtableEntry data[];
+} ObjHashtable;
+
+void ObjHashtable_init(ObjHashtable** ht) {
+  size_t size = 64;
+
+  size_t sz = sizeof(ObjHashtable) + size * HASH_BUCKET_SIZE * sizeof(ObjHashtableEntry);
+  ObjHashtable* h = malloc(sz);
+  if (h == NULL)
+    exit(1);
+  memset(h, 0, sz);
+  h->size = size;
+  *ht = h;
 }
+
+Rboolean ObjHashtable_add(ObjHashtable* ht, SEXP);
+void ObjHashtable_grow(ObjHashtable** ht) {
+  ObjHashtable* old = *ht;
+  size_t size = old->size * 2;
+  size_t sz =
+      sizeof(ObjHashtable) + size * HASH_BUCKET_SIZE * sizeof(ObjHashtableEntry);
+  ObjHashtable* h = malloc(sz);
+  if (h == NULL)
+    exit(1);
+  memset(h, 0, sz);
+  h->size = size;
+  size_t max = old->size * HASH_BUCKET_SIZE;
+  for (size_t i = 0; i < max; ++i) {
+    if (old->data[i] != NULL)
+      ObjHashtable_add(h, old->data[i]);
+  }
+  *ht = h;
+  free(old);
+}
+
+FORCE_INLINE uint32_t ObjHashtable_h(void* k) {
+  uint32_t a = (uintptr_t)k;
+  a = (a ^ 61) ^ (a >> 16);
+  a = a + (a << 3);
+  a = a ^ (a >> 4);
+  a = a * 0x27d4eb2d;
+  a = a ^ (a >> 15);
+  return a;
+}
+
+Rboolean ObjHashtable_add(ObjHashtable* ht, SEXP p) {
+  long key = ObjHashtable_h(p);
+  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+  long el = 0;
+  while (ht->data[idx + el] != NULL && el < HASH_BUCKET_SIZE) {
+    if (ht->data[idx + el] == p) {
+      R_Suicide("ht err 3");
+    }
+    ++el;
+  }
+  if (el == HASH_BUCKET_SIZE) {
+    return FALSE;
+  }
+  CHECK(ht->data[idx + el] == NULL);
+  CHECK(el >= 0 && el < HASH_BUCKET_SIZE);
+  ht->data[idx + el] = p;
+  return TRUE;
+}
+
+Rboolean ObjHashtable_exists(ObjHashtable* ht, SEXP p) {
+  long key = ObjHashtable_h(p);
+  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+  long el = 0;
+  while (el < HASH_BUCKET_SIZE && ht->data[idx + el] != NULL) {
+    if (ht->data[idx + el] == p)
+      return TRUE;
+    ++el;
+  }
+  return FALSE;
+}
+
+void ObjHashtable_remove_el(ObjHashtable* ht, size_t pos) {
+  do {
+    ht->data[pos] = ht->data[pos + 1];
+    ++pos;
+  } while (pos % HASH_BUCKET_SIZE != 0);
+  ht->data[pos - 1] = NULL;
+}
+
+void ObjHashtable_remove(ObjHashtable* ht, SEXP p) {
+  long key = ObjHashtable_h(p);
+  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+  long el = 0;
+  while (el < HASH_BUCKET_SIZE) {
+    if (ht->data[idx + el] == p) {
+      ObjHashtable_remove_el(ht, idx + el);
+      return;
+    }
+    el++;
+  }
+  CHECK(0);
+}
+
+// ===============================================================================
+
+
 
 #define UNMARKED 0
 uint8_t THE_MARK = 1;
@@ -219,9 +321,6 @@ size_t CELL_ALIGNED[NUM_BUCKETS] = {
 typedef struct Page {
   uint8_t mark[MAX_IDX];
   size_t reclaimed_nodes;
-  struct Page* next;
-  struct Page* prev;
-  uint8_t full;
   uint8_t bkt;
   uint8_t last_mark;
   uintptr_t start;
@@ -257,11 +356,11 @@ typedef struct BigObject {
 void doGc(unsigned);
 
 typedef struct SizeBucket {
-  Page* pages;
   Page* to_bump;
   Page* to_sweep;
+  size_t sweep_idx;
   size_t num_pages;
-  Hashtable* last_mark;
+  PageHashtable* pagesHt;
 } SizeBucket;
 
 typedef struct FreePage {
@@ -284,6 +383,7 @@ struct {
   uintptr_t pageArenaFinger;
   FreePage* freePage;
   size_t numFreeCommitedPages;
+  ObjHashtable* newBigObjectsHt;
 } HEAP;
 
 SEXP* MarkStack;
@@ -294,10 +394,11 @@ int heapIsInitialized = 0;
 void new_gc_initHeap() {
   for (size_t i = 0; i < NUM_BUCKETS; ++i) {
     SizeBucket* bucket = &HEAP.sizeBucket[i];
-    bucket->to_bump = bucket->to_sweep = bucket->pages = NULL;
+    bucket->to_bump = bucket->to_sweep = NULL;
     bucket->num_pages = 0;
-    Hashtable_init(&bucket->last_mark);
+    PageHashtable_init(&bucket->pagesHt);
   }
+  ObjHashtable_init(&HEAP.newBigObjectsHt);
   HEAP.page_limit = INITIAL_PAGE_LIMIT;
   HEAP.bigObjects = NULL;
   HEAP.bigObjectSize = 0;
@@ -325,7 +426,7 @@ void new_gc_initHeap() {
   heapIsInitialized = 1;
 }
 
-inline SEXP alloc(size_t sz);
+SEXP alloc(size_t sz);
 
 void* allocBigObj(size_t sexp_sz) {
   size_t sz = sizeof(BigObject) + sexp_sz;
@@ -350,12 +451,16 @@ void* allocBigObj(size_t sexp_sz) {
   HEAP.bigObjects = obj;
   HEAP.bigObjectSize += sz;
 
+#ifdef CONSERVATIVE_STACK_SCAN
+  while (!ObjHashtable_add(HEAP.newBigObjectsHt, obj->data))
+    ObjHashtable_grow(&HEAP.newBigObjectsHt);
+#endif
+
   INIT_NODE(obj->data);
   return obj->data;
 }
 
 void verifyPage(Page* page) {
-  CHECK(page->next == NULL);
   uintptr_t pos = page->start;
   size_t last_idx = -1;
   while (pos != page->end) {
@@ -394,8 +499,6 @@ Page* allocPage(unsigned bkt) {
       R_Suicide("alloc page failed");
   }
   memset((void*)&page->mark, UNMARKED, MAX_IDX);
-  page->next = NULL;
-  page->prev = NULL;
   uintptr_t start = (uintptr_t)page->data;
   if (start % PAGE_IDX != 0)
     start += PAGE_IDX - (start % PAGE_IDX);
@@ -406,12 +509,10 @@ Page* allocPage(unsigned bkt) {
   size_t available = end - page->start;
   size_t tail = available % BUCKET_SIZE[bkt];
   end -= tail;
-  page->end = end;
-  page->split_page = 0;
+  page->end = page->split_page = end;
 
   page->bkt = bkt;
   page->last_mark = UNMARKED;
-  page->full = 0;
   page->available_nodes = available / BUCKET_SIZE[bkt];
   // printf("allocated a %d page %p from %p to %p\n", bkt, page, page->start,
   // page->end);
@@ -425,13 +526,15 @@ void growBucket(unsigned bkt) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   Page* page = allocPage(bkt);
 
-  page->next = bucket->pages;
-  if (bucket->pages)
-    bucket->pages->prev = page;
-  bucket->pages = page;
   bucket->to_bump = page;
-  while (!Hashtable_add(bucket->last_mark, page, page->last_mark))
-    Hashtable_grow(&bucket->last_mark);
+  PageHashtableEntry e = {page, page->last_mark, 0, 0};
+  while (!PageHashtable_add(bucket->pagesHt, e)) {
+    // TODO: this is brittle... Reordering the hashtable invalidates the
+    // sweep_idx and we need to start searching for pages to sweep from the
+    // start of the hashmap.
+    bucket->sweep_idx = 0;
+    PageHashtable_grow(&bucket->pagesHt);
+  }
 
   size_t available = page->end - page->start;
 
@@ -440,7 +543,9 @@ void growBucket(unsigned bkt) {
   HEAP.num_pages++;
 }
 
-Page* deletePage(SizeBucket* bucket, Page* p) {
+void findPageToSweep(SizeBucket* bucket);
+
+void deletePage(SizeBucket* bucket, Page* p) {
   HEAP.size -= p->end - p->start;
   CHECK(bucket->num_pages > 0);
   bucket->num_pages--;
@@ -448,15 +553,8 @@ Page* deletePage(SizeBucket* bucket, Page* p) {
   if (bucket->to_bump == p)
     bucket->to_bump = NULL;
   if (bucket->to_sweep == p)
-    bucket->to_sweep = p->next;
+    bucket->to_sweep = NULL;
   Page* del = p;
-  if (p->next)
-    p->next->prev = p->prev;
-  if (p->prev)
-    p->prev->next = p->next;
-  else
-    bucket->pages = p->next;
-  Page* next = p->next;
   FreePage* freelist = malloc(sizeof(FreePage));
   if (freelist == NULL)
     R_Suicide("int err");
@@ -468,27 +566,32 @@ Page* deletePage(SizeBucket* bucket, Page* p) {
     freelist->commited = FALSE;
   }
   HEAP.freePage = freelist;
-  return next;
 }
 
-void* findPageToSweep(SizeBucket* bucket) {
-  Page* page = bucket->to_sweep->next;
-  while (page != NULL) {
-    if (!page->full) {
+void findPageToSweep(SizeBucket* bucket) {
+  size_t l = bucket->pagesHt->size * HASH_BUCKET_SIZE;
+  size_t i = bucket->sweep_idx;
+  for (; i < l; ++i) {
+    PageHashtableEntry* e = &bucket->pagesHt->data[i];
+    if (e->page != NULL && e->to_sweep && !e->full) {
+      Page* page = e->page;
+      e->to_sweep = 0;
       page->sweep_finger = page->start;
-      page->sweep_end = page->split_page != 0 ? page->split_page : page->end;
-      page->split_page = 0;
+      page->sweep_end = page->split_page;
+      page->split_page = page->end;
       page->reclaimed_nodes = 0;
       // printf("Will now sweep a %d page %p from %p to %p\n", page->bkt, page,
       // page->start, page->sweep_end);
-      break;
+      bucket->to_sweep = page;
+      bucket->sweep_idx = i + 1;
+      return;
     }
-    page = page->next;
   }
-  bucket->to_sweep = page;
+  bucket->sweep_idx = l;
+  bucket->to_sweep = NULL;
 }
 
-void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket);
+FORCE_INLINE void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket);
 
 void* slowAllocInBucket(unsigned bkt) {
   // No luck so far. If we are below the page limit
@@ -518,7 +621,7 @@ void* slowAllocInBucket(unsigned bkt) {
 
 #define IDX2PTR(p, i) ((uintptr_t)(p) + ((i) << PAGE_IDX_BITS))
 
-inline void* sweepAllocInBucketCellAligned(unsigned bkt, SizeBucket* bucket, size_t cells) {
+FORCE_INLINE void* sweepAllocInBucketCellAligned(unsigned bkt, SizeBucket* bucket, size_t cells) {
   size_t sz = BUCKET_SIZE[bkt];
 
   // Lazy sweeping
@@ -544,7 +647,7 @@ inline void* sweepAllocInBucketCellAligned(unsigned bkt, SizeBucket* bucket, siz
     }
     if ((double)page->reclaimed_nodes / (double)page->available_nodes <=
         PAGE_FULL_TRESHOLD)
-      page->full = 1;
+      PageHashtable_get(bucket->pagesHt, page)->full = 1;
     page->sweep_finger = page->sweep_end;
     findPageToSweep(bucket);
   }
@@ -553,7 +656,7 @@ inline void* sweepAllocInBucketCellAligned(unsigned bkt, SizeBucket* bucket, siz
 }
 
 
-inline void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
+FORCE_INLINE void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
   size_t sz = BUCKET_SIZE[bkt];
 
   // Lazy sweeping
@@ -573,7 +676,7 @@ inline void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
     }
     if ((double)page->reclaimed_nodes / (double)page->available_nodes <=
         PAGE_FULL_TRESHOLD)
-      page->full = 1;
+      PageHashtable_get(bucket->pagesHt, page)->full = 1;
     page->sweep_finger = page->sweep_end;
     findPageToSweep(bucket);
   }
@@ -581,7 +684,7 @@ inline void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
   return slowAllocInBucket(bkt);
 }
 
-inline void* allocInBucket(unsigned bkt) {
+inline __attribute__((always_inline)) void* allocInBucket(unsigned bkt) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   // First try bump pointer alloc in the current page
   if (bucket->to_bump != NULL) {
@@ -612,7 +715,7 @@ inline void* allocInBucket(unsigned bkt) {
   return res;
 }
 
-inline SEXP alloc(size_t sz) {
+SEXP alloc(size_t sz) {
   unsigned bkt = FIRST_GENERIC_BUCKET;
   while (bkt < NUM_BUCKETS && BUCKET_SIZE[bkt] < sz)
     ++bkt;
@@ -628,9 +731,9 @@ inline SEXP alloc(size_t sz) {
 #define intCHARSXP 73
 SEXP new_gc_allocVector3_slow(SEXPTYPE type, R_xlen_t length);
 
-SEXP inline new_gc_allocVector3(SEXPTYPE type,
-                                R_xlen_t length,
-                                R_allocator_t* allocator) {
+SEXP new_gc_allocVector3(SEXPTYPE type,
+                         R_xlen_t length,
+                         R_allocator_t* allocator) {
   if (allocator != NULL)
     error(_("custom allocator not supported"));
 
@@ -780,10 +883,11 @@ void heapStatistics() {
 
   for (size_t i = 0; i < NUM_BUCKETS; ++i) {
     size_t available = 0;
-    Page* p = HEAP.sizeBucket[i].pages;
-    while (p != NULL) {
-      available += p->available_nodes;
-      p = p->next;
+    size_t l = HEAP.sizeBucket[i].pagesHt->size * HASH_BUCKET_SIZE;
+    for (size_t j = 0; j < l; ++j) {
+      Page* p = HEAP.sizeBucket[i].pagesHt->data[j].page;
+      if (p != NULL)
+        available += p->available_nodes;
     }
     printf(" Bucket %d (%d) : pages %d, nodes %d\n",
            i,
@@ -804,7 +908,7 @@ void finish_sweep();
 static void traceHeap();
 void traceStack();
 void free_unused_memory();
-void PROCESS_NODE(SEXP);
+static inline void PROCESS_NODE(SEXP);
 
 #include <time.h>
 
@@ -816,11 +920,11 @@ size_t marked = 0;
 
 SEXP intProtect[3] = {NULL, NULL, NULL};
 
-inline void PROCESS_NODES();
-inline void PUSH_NODE(SEXP);
+static inline void PROCESS_NODES();
+FORCE_INLINE void PUSH_NODE(SEXP);
 
 void updatePageMark(Page* p) {
-  Hashtable_set(HEAP.sizeBucket[p->bkt].last_mark, p, THE_MARK);
+  PageHashtable_get(HEAP.sizeBucket[p->bkt].pagesHt, p)->last_mark = THE_MARK;
   p->last_mark = THE_MARK;
 }
 
@@ -880,7 +984,9 @@ void doGc(unsigned bkt) {
     intProtect[2] = NULL;
   }
 
-  // traceStack();
+#ifdef CONSERVATIVE_STACK_SCAN
+  traceStack();
+#endif
   traceHeap();
   CHECK(MSpos == 0);
 
@@ -919,22 +1025,27 @@ void doGc(unsigned bkt) {
       marked);
 #endif
   fullCollection = p > FULL_COLLECTION_TRIGGER;
+
+#ifdef CONSERVATIVE_STACK_SCAN
+  free(HEAP.newBigObjectsHt);
+  ObjHashtable_init(&HEAP.newBigObjectsHt);
+#endif
 }
 
 void clear_marks() {
   for (size_t s = 0; s < NUM_BUCKETS; ++s) {
     SizeBucket* bucket = &HEAP.sizeBucket[s];
 
-    size_t ht_size = bucket->last_mark->size * bucket->last_mark->bucket_size;
+    size_t ht_size = bucket->pagesHt->size * HASH_BUCKET_SIZE;
     for (size_t i = 0; i < ht_size; ++i) {
-      HashtableEntry e = bucket->last_mark->data[i];
-      if (e.page != NULL) {
-        Page* p = e.page;
+      PageHashtableEntry* e = &bucket->pagesHt->data[i];
+      if (e->page != NULL) {
+        Page* p = e->page;
         CHECK(p->sweep_finger <= p->sweep_end &&
               p->sweep_end <= p->alloc_finger);
-        p->full = 0;
+        e->full = 0;
         p->last_mark = UNMARKED;
-        bucket->last_mark->data[i].mark = UNMARKED;
+        e->last_mark = UNMARKED;
         p->sweep_finger = p->sweep_end;
         memset(&p->mark, UNMARKED, MAX_IDX);
       }
@@ -951,23 +1062,26 @@ void free_unused_memory(unsigned bkt, Rboolean all) {
   for (size_t s = 0; s < NUM_BUCKETS; ++s) {
     SizeBucket* bucket = &HEAP.sizeBucket[s];
 
-    size_t ht_size = bucket->last_mark->size * bucket->last_mark->bucket_size;
+    size_t ht_size = bucket->pagesHt->size * HASH_BUCKET_SIZE;
     for (size_t i = 0; i < ht_size; ++i) {
-      HashtableEntry e = bucket->last_mark->data[i];
-      if (e.page != NULL) {
-        if (e.mark < THE_MARK) {
-          CHECK(e.mark == e.page->last_mark);
-          Hashtable_remove_el(bucket->last_mark, i);
-          deletePage(bucket, e.page);
+      PageHashtableEntry* e = &bucket->pagesHt->data[i];
+      if (e->page != NULL) {
+        if (e->last_mark < THE_MARK) {
+          CHECK(e->last_mark == e->page->last_mark);
+          deletePage(bucket, e->page);
+          PageHashtable_remove_el(bucket->pagesHt, i);
+        } else {
+          e->to_sweep = 1;
         }
       }
     }
 
-    bucket->to_sweep = bucket->pages;
     // If a page has still some bump-alloc space left we need to make sure not
     // to lazy-sweep into the this part of the page during this gc cycle.
     if (bucket->to_bump)
       bucket->to_bump->split_page = bucket->to_bump->alloc_finger;
+    bucket->sweep_idx = 0;
+    findPageToSweep(bucket);
   }
 
   if (bkt != NUM_BUCKETS && !all)
@@ -991,11 +1105,11 @@ void free_unused_memory(unsigned bkt, Rboolean all) {
   }
 }
 
-inline Rboolean NODE_IS_MARKED(SEXP s) {
+FORCE_INLINE Rboolean NODE_IS_MARKED(SEXP s) {
   return ISMARKED(s);
 }
 
-inline void FORWARD_NODE(SEXP s) {
+static inline void FORWARD_NODE(SEXP s) {
   if (s == NULL || s == R_NilValue)
     return;
   markIfUnmarked(s, {
@@ -1024,7 +1138,7 @@ void growMarkStack() {
   MarkStack = newMS;
 }
 
-inline void __attribute__((always_inline)) PUSH_NODE(SEXP s) {
+FORCE_INLINE void PUSH_NODE(SEXP s) {
   if (s == NULL || s == R_NilValue)
     return;
   if (MSpos >= MSsize) {
@@ -1042,7 +1156,7 @@ inline void __attribute__((always_inline)) PUSH_NODE(SEXP s) {
   if ((s)->sxpinfo.old != 1)      \
     (s)->sxpinfo.old = 1
 
-inline void PROCESS_NODE(SEXP cur) {
+static inline void PROCESS_NODE(SEXP cur) {
   SEXP attrib = ATTRIB(cur);
   switch (TYPEOF(cur)) {
     case CHARSXP:
@@ -1194,3 +1308,66 @@ void ATTRIB_WRITE_BARRIER(SEXP x, SEXP y) {
     intProtect[1] = (p2);             \
     (s) = allocInBucket(PROM_BUCKET); \
   } while (0)
+
+
+#ifdef CONSERVATIVE_STACK_SCAN
+Rboolean isValidUnmarkedSexp(void* ptr) {
+  Page* page = PTR2PAGE(ptr);
+  if (page == NULL)
+    return FALSE;
+  if (ObjHashtable_exists(HEAP.newBigObjectsHt, ptr)) {
+    return PTR2BIG(ptr)->mark < THE_MARK;
+  }
+  for (size_t s = 0; s < NUM_BUCKETS; ++s) {
+    SizeBucket* bucket = &HEAP.sizeBucket[s];
+    if (PageHashtable_exists(bucket->pagesHt, page)) {
+      Rboolean aligned =
+        ((uintptr_t)ptr - page->start) % BUCKET_SIZE[page->bkt];
+      if (aligned != 0 || (uintptr_t)ptr < page->start || (uintptr_t)ptr >= page->alloc_finger)
+        return FALSE;
+      if ((uintptr_t)ptr >= page->sweep_end) {
+        // bump pointer fresh allocated
+        return TRUE;
+      } else {
+        if ((uintptr_t)ptr < page->sweep_finger) {
+          // This cell has been lazy swept. It is a fresh allocation if it is unmarked.
+          return page->mark[PTR2IDX(ptr)] < THE_MARK;
+        } else {
+          // This object has not been swept, it's either marked or dead
+          return FALSE;
+        }
+      }
+    }
+  }
+  return FALSE;
+}
+
+
+extern void doTraceStack() {
+  void ** p = (void**)__builtin_frame_address(0);
+
+  while ((uintptr_t)p != R_CStackStart) {
+    if ((uintptr_t)*p % 2 == 0 && isValidUnmarkedSexp(*p)) {
+      FORWARD_NODE(*p);
+    }
+    p += R_CStackDir;
+  }
+}
+
+
+void traceStack() {
+  // Clobber all registers, this should spill them to the stack.
+  // -> force all variables currently hold in registers to be spilled
+  //    to the stack where our stackScan can find them.
+  __asm__ __volatile__(
+      #ifdef __APPLE__
+      "push %%rbp \n\t call _doTraceStack \n\t pop %%rbp"
+      #else
+      "push %%rbp \n\t call doTraceStack \n\t pop %%rbp"
+      #endif
+      : : 
+      : "%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi",
+      "%r8", "%r9", "%r10", "%r11", "%r12",
+      "%r13", "%r14", "%r15");
+}
+#endif
