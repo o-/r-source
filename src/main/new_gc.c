@@ -73,7 +73,9 @@ typedef struct PageHashtable {
 void PageHashtable_init(PageHashtable** ht) {
   size_t size = 64;
 
-  size_t sz = sizeof(PageHashtable) + size * HASH_BUCKET_SIZE * sizeof(PageHashtableEntry);
+  // make the size 1 too big to make it safe to read one element after the
+  // bounds. See PageHashtable_remove_el for an example.
+  size_t sz = sizeof(PageHashtable) + size * HASH_BUCKET_SIZE * sizeof(PageHashtableEntry) + sizeof(PageHashtableEntry);
   PageHashtable* h = malloc(sz);
   if (h == NULL)
     exit(1);
@@ -86,8 +88,7 @@ Rboolean PageHashtable_add(PageHashtable* ht, PageHashtableEntry);
 void PageHashtable_grow(PageHashtable** ht) {
   PageHashtable* old = *ht;
   size_t size = old->size * 2;
-  size_t sz =
-      sizeof(PageHashtable) + size * HASH_BUCKET_SIZE * sizeof(PageHashtableEntry);
+  size_t sz = sizeof(PageHashtable) + size * HASH_BUCKET_SIZE * sizeof(PageHashtableEntry) + sizeof(PageHashtableEntry);
   PageHashtable* h = malloc(sz);
   if (h == NULL)
     exit(1);
@@ -175,7 +176,7 @@ typedef struct ObjHashtable {
 void ObjHashtable_init(ObjHashtable** ht) {
   size_t size = 64;
 
-  size_t sz = sizeof(ObjHashtable) + size * HASH_BUCKET_SIZE * sizeof(ObjHashtableEntry);
+  size_t sz = sizeof(ObjHashtable) + size * HASH_BUCKET_SIZE * sizeof(ObjHashtableEntry) + sizeof(ObjHashtableEntry);
   ObjHashtable* h = malloc(sz);
   if (h == NULL)
     exit(1);
@@ -189,7 +190,7 @@ void ObjHashtable_grow(ObjHashtable** ht) {
   ObjHashtable* old = *ht;
   size_t size = old->size * 2;
   size_t sz =
-      sizeof(ObjHashtable) + size * HASH_BUCKET_SIZE * sizeof(ObjHashtableEntry);
+      sizeof(ObjHashtable) + size * HASH_BUCKET_SIZE * sizeof(ObjHashtableEntry) + sizeof(ObjHashtableEntry);
   ObjHashtable* h = malloc(sz);
   if (h == NULL)
     exit(1);
@@ -429,9 +430,6 @@ void* allocBigObj(size_t sexp_sz) {
 
   if (HEAP.bigObjectSize + sz > HEAP.bigObjectLimit)
     doGc(NUM_BUCKETS);
-
-  if (HEAP.bigObjectSize + sz > HEAP.bigObjectLimit)
-    HEAP.bigObjectLimit = (HEAP.bigObjectSize + sz) * (1.0 + (1.0-BIG_OBJ_HEAP_SLACK));
 
   void* data = malloc(sz);
   if (data == NULL)
@@ -1001,7 +999,7 @@ void doGc(unsigned bkt) {
   clock_gettime(CLOCK_MONOTONIC, &time3);
 #endif
 
-  free_unused_memory(bkt, fullCollection);
+  free_unused_memory(bkt, TRUE);
   gc_cnt++;
 #if GCPROF
   if (gc_cnt % 10 == 0)
@@ -1012,10 +1010,18 @@ void doGc(unsigned bkt) {
   if (bkt == NUM_BUCKETS) {
     if (p > BIG_OBJ_HEAP_SLACK && fullCollection) {
         HEAP.bigObjectLimit *= GROW_RATE;
+        if (HEAP.bigObjectSize > HEAP.bigObjectLimit)
+          HEAP.bigObjectLimit = HEAP.bigObjectSize + HEAP.bigObjectSize * (1-BIG_OBJ_HEAP_SLACK);
+#ifdef GCPROF
+        printf("Growing big obj limit to %fm", HEAP.bigObjectLimit/1024.0/1024.0);
+#endif
     }
   } else {
     if (p > HEAP_SLACK && fullCollection) {
       HEAP.page_limit *= GROW_RATE;
+#ifdef GCPROF
+        printf("Growing page limit to %d\n", HEAP.page_limit);
+#endif
     }
   }
 
