@@ -304,7 +304,6 @@ size_t CELL_ALIGNED[NUM_BUCKETS] = {
 
 typedef struct Page {
   uint8_t mark[MAX_IDX];
-  uint8_t in_use[MAX_IDX];
   size_t reclaimed_nodes;
   uint8_t bkt;
   uint8_t last_mark;
@@ -320,7 +319,6 @@ typedef struct Page {
 
 typedef struct BigObject {
   uint8_t mark;
-  struct BigObject* next;
   size_t size;
   SEXPREC data[];
 } BigObject;
@@ -334,6 +332,7 @@ typedef struct BigObject {
 #define ISMARKED(s)                                      \
   (ISNODE(s) ? PTR2PAGE(s)->mark[PTR2IDX(s)] == THE_MARK \
              : PTR2BIG(s)->mark == THE_MARK)
+#define NODE_IS_MARKED(s) ISMARKED(s)
 #define GETMARK(s) \
   (ISNODE(s) ? &PTR2PAGE(s)->mark[PTR2IDX(s)] : &PTR2BIG(s)->mark)
 #define INIT_NODE(s) (*(uint32_t*)&((SEXP)(s))->sxpinfo = 0)
@@ -357,7 +356,6 @@ typedef struct FreePage {
 #define MAX_PAGES 600000L
 struct {
   SizeBucket sizeBucket[NUM_BUCKETS];
-  BigObject* bigObjects;
   size_t page_limit;
   size_t num_pages;
   size_t bigObjectSize;
@@ -368,8 +366,8 @@ struct {
   uintptr_t pageArenaFinger;
   FreePage* freePage;
   size_t numFreeCommitedPages;
-#ifdef CONSERVATIVE_STACK_SCAN
   ObjHashtable* bigObjectsHt;
+#ifdef CONSERVATIVE_STACK_SCAN
   PageHashtable* pagesHt;
 #endif
 } HEAP;
@@ -393,7 +391,6 @@ void new_gc_initHeap() {
     PageHashtable_init(&bucket->pagesHt);
   }
   HEAP.page_limit = INITIAL_PAGE_LIMIT;
-  HEAP.bigObjects = NULL;
   HEAP.bigObjectSize = 0;
   HEAP.bigObjectLimit = INITIAL_BIG_OBJ_LIMIT;
   HEAP.size = 0;
@@ -416,8 +413,8 @@ void new_gc_initHeap() {
   HEAP.freePage = NULL;
   MarkStack = malloc(sizeof(SEXP) * INITIAL_MS_SIZE);
   MSsize = INITIAL_MS_SIZE;
-#ifdef CONSERVATIVE_STACK_SCAN
   ObjHashtable_init(&HEAP.bigObjectsHt);
+#ifdef CONSERVATIVE_STACK_SCAN
   PageHashtable_init(&HEAP.pagesHt);
   TraceStackStack = malloc(sizeof(SEXP) * INITIAL_MS_SIZE);
   TSsize = INITIAL_MS_SIZE;
@@ -444,16 +441,12 @@ void* allocBigObj(size_t sexp_sz) {
   // printf("Malloced big %p\n", obj);
 
   obj->mark = UNMARKED;
-  obj->next = HEAP.bigObjects;
   obj->size = sz;
 
-  HEAP.bigObjects = obj;
   HEAP.bigObjectSize += sz;
 
-#ifdef CONSERVATIVE_STACK_SCAN
   while (!ObjHashtable_add(HEAP.bigObjectsHt, obj->data))
     ObjHashtable_grow(&HEAP.bigObjectsHt);
-#endif
 
   INIT_NODE(obj->data);
   return obj->data;
@@ -1061,10 +1054,13 @@ void clear_marks() {
       }
     }
   }
-  BigObject* o = HEAP.bigObjects;
-  while (o != NULL) {
-    o->mark = UNMARKED;
-    o = o->next;
+  size_t ht_size = HEAP.bigObjectsHt->size * HASH_BUCKET_SIZE;
+  for (int i = 0; i < ht_size; ++i) {
+    SEXP os = HEAP.bigObjectsHt->data[i];
+    if (os) {
+      BigObject* o = PTR2BIG(os);
+      o->mark = UNMARKED;
+    }
   }
 }
 
@@ -1106,29 +1102,19 @@ void free_unused_memory(unsigned bkt, Rboolean all) {
   if (bkt != NUM_BUCKETS && !all)
     return;
 
-  BigObject* o = HEAP.bigObjects;
-  BigObject** prevptr = &HEAP.bigObjects;
-  while (o != NULL) {
-    if (o->mark < THE_MARK) {
-      HEAP.bigObjectSize -= o->size;
-#ifdef CONSERVATIVE_STACK_SCAN
-      ObjHashtable_remove(HEAP.bigObjectsHt, o->data);
-#endif
-      void* del = o;
-      size_t sz = o->size;
-      *prevptr = o->next;
-      o = o->next;
-      ON_DEBUG(memset(del, 0xd0, sz));
-      free(del);
-    } else {
-      prevptr = &o->next;
-      o = o->next;
+  size_t ht_size = HEAP.bigObjectsHt->size * HASH_BUCKET_SIZE;
+  for (int i = 0; i < ht_size; ++i) {
+    SEXP os = HEAP.bigObjectsHt->data[i];
+    if (os) {
+      BigObject* o = PTR2BIG(os);
+      if (o->mark < THE_MARK) {
+        HEAP.bigObjectSize -= o->size;
+        ObjHashtable_remove(HEAP.bigObjectsHt, o->data);
+        ON_DEBUG(memset(o, 0xd0, o->size));
+        free(o);
+      }
     }
   }
-}
-
-FORCE_INLINE Rboolean NODE_IS_MARKED(SEXP s) {
-  return ISMARKED(s);
 }
 
 static inline void FORWARD_NODE(SEXP s) {
