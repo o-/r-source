@@ -309,7 +309,6 @@ typedef struct Page {
   uint8_t last_mark;
   uintptr_t start;
   uintptr_t end;
-  uintptr_t split_page;
   uintptr_t sweep_end;
   uintptr_t alloc_finger;
   uintptr_t sweep_finger;
@@ -501,7 +500,7 @@ Page* allocPage(unsigned bkt) {
   size_t available = end - page->start;
   size_t tail = available % BUCKET_SIZE[bkt];
   end -= tail;
-  page->end = page->split_page = page->sweep_finger = end;
+  page->end = page->sweep_finger = end;
 
   page->bkt = bkt;
   page->last_mark = UNMARKED;
@@ -903,7 +902,7 @@ void finish_sweep();
 static void traceHeap();
 void traceStack();
 void free_unused_memory();
-static inline void PROCESS_NODE(SEXP);
+FORCE_INLINE void PROCESS_NODE(SEXP);
 
 #include <time.h>
 
@@ -915,7 +914,7 @@ size_t marked = 0;
 
 SEXP intProtect[3] = {NULL, NULL, NULL};
 
-static inline void PROCESS_NODES();
+FORCE_INLINE void PROCESS_NODES();
 FORCE_INLINE void PUSH_NODE(SEXP);
 
 void updatePageMark(Page* p) {
@@ -1130,7 +1129,7 @@ static inline void FORWARD_NODE(SEXP s) {
     PROCESS_NODES();
 }
 
-inline void PROCESS_NODES() {
+FORCE_INLINE void PROCESS_NODES() {
   while (MSpos > 0) {
     PROCESS_NODE(MarkStack[--MSpos]);
   }
@@ -1164,7 +1163,7 @@ FORCE_INLINE void PUSH_NODE(SEXP s) {
   if ((s)->sxpinfo.old != 1)      \
     (s)->sxpinfo.old = 1
 
-static inline void PROCESS_NODE(SEXP cur) {
+FORCE_INLINE void PROCESS_NODE(SEXP cur) {
   SEXP attrib = ATTRIB(cur);
   switch (TYPEOF(cur)) {
     case CHARSXP:
