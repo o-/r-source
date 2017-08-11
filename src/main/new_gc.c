@@ -281,22 +281,23 @@ Rboolean fullCollection = FALSE;
 #define ENV_BUCKET 1
 #define PROM_BUCKET 2
 #define GENERIC_SEXP_BUCKET 3
-#define NUM_BUCKETS 19
+#define NUM_BUCKETS 18
 #define FIRST_GENERIC_BUCKET 4
 
 size_t BUCKET_SIZE[NUM_BUCKETS] = {
   40, 40, 40, 40,
-  32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256, 320};
+  32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256};
 size_t CELL_ALIGNED[NUM_BUCKETS] = {
   0, 0, 0, 0,
-  1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 4, 5, 6, 8, 10};
+  1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 4, 5, 6, 8};
 
 #define INITIAL_PAGE_LIMIT 400
 #define FREE_PAGES_SLACK 400
-#define INITIAL_BIG_OBJ_LIMIT (16 * 1024 * 1024)
+#define INITIAL_BIG_OBJ_LIMIT (8 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
-#define GROW_RATE 1.16
+#define GROW_RATE 1.2
 #define HEAP_SLACK 0.85
+#define BIG_OBJ_HEAP_SLACK 0.8
 #define FULL_COLLECTION_TRIGGER 0.95
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 1000
@@ -430,7 +431,7 @@ void* allocBigObj(size_t sexp_sz) {
     doGc(NUM_BUCKETS);
 
   if (HEAP.bigObjectSize + sz > HEAP.bigObjectLimit)
-    HEAP.bigObjectLimit = (HEAP.bigObjectSize + sz) * HEAP_SLACK;
+    HEAP.bigObjectLimit = (HEAP.bigObjectSize + sz) * (1.0 + (1.0-BIG_OBJ_HEAP_SLACK));
 
   void* data = malloc(sz);
   if (data == NULL)
@@ -1008,10 +1009,12 @@ void doGc(unsigned bkt) {
 #endif
 
   double p = pressure(bkt);
-  if (p > HEAP_SLACK && fullCollection) {
-    if (bkt == NUM_BUCKETS) {
-      HEAP.bigObjectLimit *= GROW_RATE;
-    } else {
+  if (bkt == NUM_BUCKETS) {
+    if (p > BIG_OBJ_HEAP_SLACK && fullCollection) {
+        HEAP.bigObjectLimit *= GROW_RATE;
+    }
+  } else {
+    if (p > HEAP_SLACK && fullCollection) {
       HEAP.page_limit *= GROW_RATE;
     }
   }
