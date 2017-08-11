@@ -35,7 +35,7 @@
 
 #define FORCE_INLINE inline __attribute__((always_inline))
 
-#define GCPROF 1
+// #define GCPROF 1
 // #define GCDEBUG
 
 #ifdef GCDEBUG
@@ -368,8 +368,10 @@ struct {
   uintptr_t pageArenaFinger;
   FreePage* freePage;
   size_t numFreeCommitedPages;
+#ifdef CONSERVATIVE_STACK_SCAN
   ObjHashtable* bigObjectsHt;
   PageHashtable* pagesHt;
+#endif
 } HEAP;
 
 SEXP* MarkStack;
