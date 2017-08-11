@@ -291,12 +291,12 @@ size_t CELL_ALIGNED[NUM_BUCKETS] = {
   0, 0, 0, 0,
   1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 4, 5, 6, 8, 10};
 
-#define INITIAL_PAGE_LIMIT 800
-#define FREE_PAGES_SLACK 800
+#define INITIAL_PAGE_LIMIT 400
+#define FREE_PAGES_SLACK 400
 #define INITIAL_BIG_OBJ_LIMIT (16 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
 #define GROW_RATE 1.16
-#define HEAP_SLACK 0.83
+#define HEAP_SLACK 0.85
 #define FULL_COLLECTION_TRIGGER 0.95
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 1000
@@ -684,7 +684,7 @@ FORCE_INLINE void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
   return slowAllocInBucket(bkt);
 }
 
-inline __attribute__((always_inline)) void* allocInBucket(unsigned bkt) {
+FORCE_INLINE void* allocInBucket(unsigned bkt) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   // First try bump pointer alloc in the current page
   if (bucket->to_bump != NULL) {
@@ -984,9 +984,7 @@ void doGc(unsigned bkt) {
 
 #ifdef CONSERVATIVE_STACK_SCAN
   processStackNodes();
-#endif
-
-  // TODO not neccessary
+#else
   if (intProtect[0]) {
     PUSH_NODE(intProtect[0]);
     intProtect[0] = NULL;
@@ -999,6 +997,7 @@ void doGc(unsigned bkt) {
     PUSH_NODE(intProtect[2]);
     intProtect[2] = NULL;
   }
+#endif
 
   traceHeap();
   CHECK(MSpos == 0);
@@ -1335,7 +1334,7 @@ void ATTRIB_WRITE_BARRIER(SEXP x, SEXP y) {
 
 void growTSStack() {
   size_t old_size = TSsize*sizeof(SEXP);
-  TSsize *= 1.5;
+  TSsize *= 2;
   size_t new_size = TSsize*sizeof(SEXP);
   SEXP* newTS = malloc(new_size);
   memcpy(newTS, TraceStackStack, old_size);
@@ -1343,7 +1342,7 @@ void growTSStack() {
   TraceStackStack = newTS;
 }
 
-Rboolean isValidSexp(void* ptr) {
+FORCE_INLINE Rboolean isNewValidSexp(void* ptr) {
   if (ptr == NULL || (uintptr_t)ptr % 8 != 0)
     return FALSE;
   Page* page = PTR2PAGE(ptr);
@@ -1366,13 +1365,17 @@ Rboolean isValidSexp(void* ptr) {
       return TRUE;
 
     // swept space
-    if (pos < page->sweep_finger)
-      return TRUE;
+    if (pos < page->sweep_finger) {
+      if (fullCollection)
+        return TRUE;
+      return page->mark[PTR2IDX(ptr)] < THE_MARK;
+    }
 
     // Not yet swept space
-    return page->mark[PTR2IDX(ptr)] == THE_MARK;
+    return fullCollection && page->mark[PTR2IDX(ptr)] == THE_MARK;
   }
-  return ObjHashtable_exists(HEAP.bigObjectsHt, ptr);
+  return ObjHashtable_exists(HEAP.bigObjectsHt, ptr) &&
+      (fullCollection || PTR2BIG(ptr)->mark < THE_MARK);
 }
 
 
@@ -1380,9 +1383,10 @@ extern void doTraceStack() {
   void ** p = (void**)__builtin_frame_address(0);
 
   while ((uintptr_t)p != R_CStackStart) {
-    if (isValidSexp(*p)) {
+    if (isNewValidSexp(*p)) {
       //printf("found %p\n", *p);
       CHECK((uintptr_t)*p % 8 == 0);
+      CHECK(fullCollection || !ISMARKED(*p));
       CHECK(ATTRIB((SEXP)*p) == NULL ||
           (!ISMARKED(ATTRIB((SEXP)*p)) || ISMARKED(ATTRIB((SEXP)*p))));
 #ifdef GCPROF
