@@ -292,15 +292,15 @@ size_t CELL_ALIGNED[NUM_BUCKETS] = {
   0, 0, 0, 0,
   1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 4, 5, 6, 8};
 
-#define INITIAL_PAGE_LIMIT 400
-#define FREE_PAGES_SLACK 100
-#define INITIAL_HEAP_LIMIT (20 * 1024 * 1024)
+#define INITIAL_PAGE_LIMIT 300
+#define FREE_PAGES_SLACK 50
+#define INITIAL_HEAP_LIMIT (6 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
-#define HEAP_GROW_RATE 1.13
-#define PAGES_GROW_RATE 1.13
-#define HEAP_SIZE_SLACK 0.79
-#define HEAP_PAGES_SLACK 0.81
-#define FULL_COLLECTION_TRIGGER 0.96
+#define HEAP_GROW_RATE 1.1
+#define PAGES_GROW_RATE 1.1
+#define HEAP_SIZE_SLACK 0.8
+#define HEAP_PAGES_SLACK 0.75
+#define FULL_COLLECTION_TRIGGER 0.92
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 1000
 #define INITIAL_MS_SIZE 4000
@@ -1179,7 +1179,7 @@ FORCE_INLINE void PUSH_NODE(SEXP s) {
   if ((s)->sxpinfo.old != 1)      \
     (s)->sxpinfo.old = 1
 
-FORCE_INLINE void PROCESS_NODE(SEXP cur) {
+void PROCESS_NODE_SLOW(SEXP cur) {
   SEXP attrib = ATTRIB(cur);
   switch (TYPEOF(cur)) {
     case CHARSXP:
@@ -1244,6 +1244,24 @@ FORCE_INLINE void PROCESS_NODE(SEXP cur) {
       break;
     default:
       CHECK(0);
+  }
+}
+
+
+FORCE_INLINE void PROCESS_NODE(SEXP cur) {
+  if (ATTRIB(cur) != R_NilValue)
+    return PROCESS_NODE_SLOW(cur);
+
+  switch (TYPEOF(cur)) {
+    case SPECIALSXP:
+    case BUILTINSXP:
+    case CHARSXP:
+    case LGLSXP:
+    case INTSXP:
+    case REALSXP:
+      break;
+    default:
+      PROCESS_NODE_SLOW(cur);
   }
 }
 
