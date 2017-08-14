@@ -294,13 +294,15 @@ size_t CELL_ALIGNED[NUM_BUCKETS] = {
 
 #define INITIAL_PAGE_LIMIT 300
 #define FREE_PAGES_SLACK 50
-#define INITIAL_HEAP_LIMIT (6 * 1024 * 1024)
+#define INITIAL_HEAP_LIMIT (10 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
-#define HEAP_GROW_RATE 1.1
+#define HEAP_GROW_RATE 1.16
 #define PAGES_GROW_RATE 1.1
+#define HEAP_SHRINK_RATE 0.96
 #define HEAP_SIZE_SLACK 0.8
-#define HEAP_PAGES_SLACK 0.75
-#define FULL_COLLECTION_TRIGGER 0.92
+#define HEAP_SIZE_MAX_SLACK 0.35
+#define HEAP_PAGES_SLACK 0.77
+#define FULL_COLLECTION_TRIGGER 0.95
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 1000
 #define INITIAL_MS_SIZE 4000
@@ -882,7 +884,7 @@ void heapStatistics() {
       if (p != NULL)
         available += p->available_nodes;
     }
-    pages_size += available;
+    pages_size += available * BUCKET_SIZE[i];
     printf(" Bucket %d (%d) : pages %d, nodes %d\n",
            i,
            BUCKET_SIZE[i],
@@ -1020,6 +1022,8 @@ void doGc(unsigned bkt) {
 #ifdef GCPROF
     printf("Growing heap limit to %fm", HEAP.heapLimit/1024.0/1024.0);
 #endif
+  } else if (heapPressure < HEAP_SIZE_MAX_SLACK && fullCollection) {
+    HEAP.heapLimit *= HEAP_SHRINK_RATE;
   }
 
   if (pagePressure > HEAP_PAGES_SLACK && fullCollection) {
