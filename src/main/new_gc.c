@@ -293,12 +293,13 @@ size_t CELL_ALIGNED[NUM_BUCKETS] = {
   1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 4, 5, 6, 8};
 
 #define INITIAL_PAGE_LIMIT 400
-#define FREE_PAGES_SLACK 400
-#define INITIAL_BIG_OBJ_LIMIT (8 * 1024 * 1024)
+#define FREE_PAGES_SLACK 100
+#define INITIAL_HEAP_LIMIT (20 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
-#define GROW_RATE 1.2
-#define HEAP_SLACK 0.85
-#define BIG_OBJ_HEAP_SLACK 0.8
+#define HEAP_GROW_RATE 1.09
+#define PAGES_GROW_RATE 1.13
+#define HEAP_SIZE_SLACK 0.8
+#define HEAP_PAGES_SLACK 0.8
 #define FULL_COLLECTION_TRIGGER 0.95
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 1000
@@ -359,8 +360,7 @@ struct {
   SizeBucket sizeBucket[NUM_BUCKETS];
   size_t page_limit;
   size_t num_pages;
-  size_t bigObjectSize;
-  size_t bigObjectLimit;
+  size_t heapLimit;
   size_t size;
   void* pageArena;
   uintptr_t pageArenaEnd;
@@ -392,8 +392,7 @@ void new_gc_initHeap() {
     PageHashtable_init(&bucket->pagesHt);
   }
   HEAP.page_limit = INITIAL_PAGE_LIMIT;
-  HEAP.bigObjectSize = 0;
-  HEAP.bigObjectLimit = INITIAL_BIG_OBJ_LIMIT;
+  HEAP.heapLimit = INITIAL_HEAP_LIMIT;
   HEAP.size = 0;
   HEAP.num_pages = 0;
   HEAP.numFreeCommitedPages = 0;
@@ -428,7 +427,7 @@ SEXP alloc(size_t sz);
 void* allocBigObj(size_t sexp_sz) {
   size_t sz = sizeof(BigObject) + sexp_sz;
 
-  if (HEAP.bigObjectSize + sz > HEAP.bigObjectLimit)
+  if (HEAP.size + sz > HEAP.heapLimit)
     doGc(NUM_BUCKETS);
 
   void* data = malloc(sz);
@@ -441,7 +440,7 @@ void* allocBigObj(size_t sexp_sz) {
   obj->mark = UNMARKED;
   obj->size = sz;
 
-  HEAP.bigObjectSize += sz;
+  HEAP.size += sz;
 
   while (!ObjHashtable_add(HEAP.bigObjectsHt, obj->data))
     ObjHashtable_grow(&HEAP.bigObjectsHt);
@@ -866,14 +865,15 @@ SEXP new_gc_allocVector3_slow(SEXPTYPE type, R_xlen_t length) {
 }
 
 void heapStatistics() {
-  printf("HEAP statistics after gc %d of gen %d: size %d + %d, pages %d / %d\n",
+  printf("HEAP statistics after gc %d of gen %d: size %d / %d, pages %d / %d\n",
          gc_cnt,
          fullCollection,
          HEAP.size / 1024 / 1024,
-         HEAP.bigObjectSize / 1024 / 1024,
+         HEAP.heapLimit / 1024 / 1024,
          HEAP.num_pages,
          HEAP.page_limit);
 
+  size_t pages_size = 0;
   for (size_t i = 0; i < NUM_BUCKETS; ++i) {
     size_t available = 0;
     size_t l = HEAP.sizeBucket[i].pagesHt->size * HASH_BUCKET_SIZE;
@@ -882,18 +882,20 @@ void heapStatistics() {
       if (p != NULL)
         available += p->available_nodes;
     }
+    pages_size += available;
     printf(" Bucket %d (%d) : pages %d, nodes %d\n",
            i,
            BUCKET_SIZE[i],
            HEAP.sizeBucket[i].num_pages,
            available);
   }
+  printf(" total in pages %d\n", pages_size / 1024 / 1024);
 }
 
-double pressure(unsigned bkt) {
-  if (bkt == NUM_BUCKETS) {
-    return (double)HEAP.bigObjectSize / (double)HEAP.bigObjectLimit;
-  }
+double heap_pressure() {
+  return (double)HEAP.size / (double)HEAP.heapLimit;
+}
+double page_pressure() {
   return (double)(HEAP.num_pages) / (double)HEAP.page_limit;
 }
 
@@ -999,30 +1001,32 @@ void doGc(unsigned bkt) {
   clock_gettime(CLOCK_MONOTONIC, &time3);
 #endif
 
-  free_unused_memory(bkt, TRUE);
+  free_unused_memory(bkt, bkt);
   gc_cnt++;
 #if GCPROF
   if (gc_cnt % 10 == 0)
     heapStatistics();
 #endif
 
-  double p = pressure(bkt);
-  if (bkt == NUM_BUCKETS) {
-    if (p > BIG_OBJ_HEAP_SLACK && fullCollection) {
-        HEAP.bigObjectLimit *= GROW_RATE;
-        if (HEAP.bigObjectSize > HEAP.bigObjectLimit)
-          HEAP.bigObjectLimit = HEAP.bigObjectSize + HEAP.bigObjectSize * (1-BIG_OBJ_HEAP_SLACK);
-#ifdef GCPROF
-        printf("Growing big obj limit to %fm", HEAP.bigObjectLimit/1024.0/1024.0);
-#endif
+  double heapPressure = heap_pressure();
+  double pagePressure = page_pressure();
+  Rboolean oversize = FALSE;
+  if (heapPressure > HEAP_SIZE_SLACK && fullCollection) {
+    HEAP.heapLimit *= HEAP_GROW_RATE;
+    if (HEAP.size > HEAP.heapLimit) {
+      oversize = TRUE;
+      HEAP.heapLimit = HEAP.size + HEAP.size * (1-HEAP_SIZE_SLACK);
     }
-  } else {
-    if (p > HEAP_SLACK && fullCollection) {
-      HEAP.page_limit *= GROW_RATE;
 #ifdef GCPROF
-        printf("Growing page limit to %d\n", HEAP.page_limit);
+    printf("Growing heap limit to %fm", HEAP.heapLimit/1024.0/1024.0);
 #endif
-    }
+  }
+
+  if (pagePressure > HEAP_PAGES_SLACK && fullCollection) {
+    HEAP.page_limit *= PAGES_GROW_RATE;
+#ifdef GCPROF
+    printf("Growing page limit to %d\n", HEAP.page_limit);
+#endif
   }
 
 #ifdef GCPROF
@@ -1040,7 +1044,10 @@ void doGc(unsigned bkt) {
       toMS(&time4) - toMS(&time1),
       marked);
 #endif
-  fullCollection = p > FULL_COLLECTION_TRIGGER;
+  fullCollection =
+    heapPressure > FULL_COLLECTION_TRIGGER ||
+    pagePressure > FULL_COLLECTION_TRIGGER ||
+    oversize;
 }
 
 void clear_marks() {
@@ -1116,7 +1123,7 @@ void free_unused_memory(unsigned bkt, Rboolean all) {
     if (os) {
       BigObject* o = PTR2BIG(os);
       if (o->mark < THE_MARK) {
-        HEAP.bigObjectSize -= o->size;
+        HEAP.size -= o->size;
         ObjHashtable_remove(HEAP.bigObjectsHt, o->data);
         ON_DEBUG(memset(o, 0xd0, o->size));
         free(o);
