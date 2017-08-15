@@ -3713,6 +3713,9 @@ static void PostScriptClose(pDevDesc dd)
 {
     PostScriptDesc *pd = (PostScriptDesc *) dd->deviceSpecific;
 
+    if (!pd->psfp)
+        error("Cannot close dev with null fd");
+
     PostScriptFileTrailer(pd->psfp, pd->pageno);
     if(pd->open_type == 1)
 	pclose(pd->psfp);
