@@ -36,7 +36,8 @@
 #define FORCE_INLINE inline __attribute__((always_inline))
 
 // #define GCPROF 1
-// #define GCDEBUG
+// #define GCDEBUG 1
+// #define GCSTRESS 1
 
 #ifdef GCDEBUG
 #define CHECK(exp)                \
@@ -357,7 +358,7 @@ typedef struct FreePage {
   Rboolean commited;
 } FreePage;
 
-#define MAX_PAGES 600000L
+#define MAX_PAGES 6000000L
 struct {
   SizeBucket sizeBucket[NUM_BUCKETS];
   size_t page_limit;
@@ -551,18 +552,22 @@ void deletePage(SizeBucket* bucket, Page* p) {
   if (bucket->to_sweep == p)
     bucket->to_sweep = NULL;
   Page* del = p;
+  ON_DEBUG(memset(del, 0xd3, PAGE_SIZE));
+#ifdef GCSTRESS
+  mprotect(del, PAGE_SIZE, PROT_NONE);
+#else
   FreePage* freelist = malloc(sizeof(FreePage));
   if (freelist == NULL)
     R_Suicide("int err");
   freelist->finger = del;
   freelist->commited = TRUE;
   freelist->next = HEAP.freePage;
-  ON_DEBUG(memset(del, 0xd3, PAGE_SIZE));
   if (HEAP.numFreeCommitedPages >= FREE_PAGES_SLACK) {
     mprotect(del, PAGE_SIZE, PROT_NONE);
     freelist->commited = FALSE;
   }
   HEAP.freePage = freelist;
+#endif
 }
 
 void findPageToSweep(SizeBucket* bucket) {
@@ -633,9 +638,12 @@ FORCE_INLINE void* sweepAllocInBucketCellAligned(unsigned bkt, SizeBucket* bucke
     for (; i < l; i += cells) {
       if (page->mark[i] < THE_MARK) {
         void* res = (void*)IDX2PTR(page, i);
+        memset(res, 0x3e, BUCKET_SIZE[bkt]);
+#ifndef GCSTRESS
         page->sweep_finger = IDX2PTR(page, i + cells);
         page->reclaimed_nodes++;
         return res;
+#endif
       }
     }
     if ((double)page->reclaimed_nodes / (double)page->available_nodes <=
@@ -662,10 +670,12 @@ FORCE_INLINE void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
       CHECK(i < MAX_IDX);
       finger += sz;
       if (page->mark[i] < THE_MARK) {
+        ON_DEBUG(memset(res, 0xd5, sz));
+#ifndef GCSTRESS
         page->sweep_finger = finger;
         page->reclaimed_nodes++;
-        ON_DEBUG(memset(res, 0xd5, sz));
         return res;
+#endif
       }
     }
     if ((double)page->reclaimed_nodes / (double)page->available_nodes <=
