@@ -205,7 +205,8 @@ struct sxpinfo_struct {
     unsigned int debug :  1;
     unsigned int trace :  1;  /* functions and memory tracing */
     unsigned int spare :  1;  /* currently unused */
-    unsigned int old   :  1;
+    unsigned int old   :  1;  // used for write barrier (except write to attrib)
+    unsigned int mark  :  1;  // only used for big objects
 }; /*		    Tot: 32 */
 
 struct vecsxp_struct {

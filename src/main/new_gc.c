@@ -72,17 +72,17 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
   40, 40, 40, 40,
   32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256};
 
-#define INITIAL_PAGE_LIMIT 600
+#define INITIAL_PAGE_LIMIT 500
 #define FREE_PAGES_SLACK 50
 #define INITIAL_HEAP_LIMIT (10 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
-#define HEAP_GROW_RATE 1.7
-#define PAGES_GROW_RATE 1.6
+#define HEAP_GROW_RATE 1.5
+#define PAGES_GROW_RATE 1.4
 #define HEAP_SHRINK_RATE 0.8
-#define HEAP_SIZE_SLACK 0.78
+#define HEAP_SIZE_SLACK 0.8
 #define HEAP_SIZE_MAX_SLACK 0.35
-#define HEAP_PAGES_SLACK 0.82
-#define FULL_COLLECTION_TRIGGER 0.97
+#define HEAP_PAGES_SLACK 0.78
+#define FULL_COLLECTION_TRIGGER 0.96
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 2000
 #define INITIAL_MS_SIZE 4000
@@ -101,28 +101,19 @@ typedef struct Page {
   char data[];
 } Page;
 
-typedef struct BigObject {
-  uint8_t mark;
-  size_t size;
-  SEXPREC data[];
-} BigObject;
-
 #define PTR2PAGE(ptr) ((Page*)((uintptr_t)(ptr) & ~PAGE_MASK))
 #define PTR2IDX(ptr) (((uintptr_t)(ptr) & PAGE_MASK) >> PAGE_IDX_BITS)
-#define PTR2BIG(ptr) ((BigObject*)((uintptr_t)(ptr) - sizeof(BigObject)))
 #define ISNODE(s)                                \
   ((uintptr_t)HEAP.pageArena < (uintptr_t)(s) && \
    (uintptr_t)(s) < HEAP.pageArenaEnd)
 #define ISMARKED(s)                                      \
   (ISNODE(s) ? PTR2PAGE(s)->mark[PTR2IDX(s)] == THE_MARK \
-             : PTR2BIG(s)->mark == THE_MARK)
+             : (s)->sxpinfo.mark == THE_MARK)
 #define NODE_IS_MARKED(s) ISMARKED(s)
-#define GETMARK(s) \
-  (ISNODE(s) ? &PTR2PAGE(s)->mark[PTR2IDX(s)] : &PTR2BIG(s)->mark)
 #define INIT_NODE(s) (*(uint32_t*)&((SEXP)(s))->sxpinfo = 0)
 
 void doGc(unsigned);
-void free_unused_memory(unsigned);
+void free_unused_memory();
 
 typedef struct SizeBucket {
   Page* to_bump;
@@ -213,28 +204,25 @@ void new_gc_initHeap() {
 SEXP alloc(size_t sz);
 
 void* allocBigObj(size_t sexp_sz) {
-  size_t sz = sizeof(BigObject) + sexp_sz;
+  size_t sz = sexp_sz;
 
   if (HEAP.size + sz > HEAP.heapLimit)
     doGc(NUM_BUCKETS);
 
-  void* data = malloc(sz);
+  SEXP data = (SEXP)malloc(sz);
   if (data == NULL)
     Rf_errorcall(R_NilValue, "error alloc");
 
-  BigObject* obj = (BigObject*)data;
   // printf("Malloced big %p\n", obj);
-
-  obj->mark = UNMARKED;
-  obj->size = sz;
 
   HEAP.size += sz;
 
-  while (!ObjHashtable_add(HEAP.bigObjectsHt, obj->data))
+  ObjHashtableEntry e = {data, UNMARKED};
+  while (!ObjHashtable_add(HEAP.bigObjectsHt, e))
     ObjHashtable_grow(&HEAP.bigObjectsHt);
 
-  INIT_NODE(obj->data);
-  return obj->data;
+  INIT_NODE(data);
+  return data;
 }
 
 void verifyPage(Page* page) {
@@ -750,9 +738,9 @@ void updatePageMark(Page* p) {
       { what; }                                                        \
     }                                                                  \
   } else {                                                             \
-    BigObject* _o_ = PTR2BIG((s));                                     \
-    if (_o_->mark < THE_MARK) {                                        \
-      _o_->mark = THE_MARK;                                            \
+    if ((s)->sxpinfo.mark < THE_MARK) {                                \
+      (s)->sxpinfo.mark = THE_MARK;                                    \
+      ObjHashtable_get(HEAP.bigObjectsHt, s)->mark = THE_MARK;         \
       { what; }                                                        \
     }                                                                  \
   }
@@ -816,7 +804,7 @@ void doGc(unsigned bkt) {
   clock_gettime(CLOCK_MONOTONIC, &time3);
 #endif
 
-  free_unused_memory(bkt);
+  free_unused_memory();
   gc_cnt++;
 #if GCPROF
   if (fullCollection || gc_cnt % 10 == 0)
@@ -833,7 +821,7 @@ void doGc(unsigned bkt) {
       HEAP.heapLimit = HEAP.size + HEAP.size * (1-HEAP_SIZE_SLACK);
     }
 #ifdef GCPROF
-    printf("Growing heap limit to %fm", HEAP.heapLimit/1024.0/1024.0);
+    printf("Growing heap limit to %f\n", HEAP.heapLimit/1024.0/1024.0);
 #endif
   } else if (heapPressure < HEAP_SIZE_MAX_SLACK && fullCollection) {
     HEAP.heapLimit *= HEAP_SHRINK_RATE;
@@ -887,15 +875,16 @@ void clear_marks() {
   }
   size_t ht_size = HEAP.bigObjectsHt->size * HASH_BUCKET_SIZE;
   for (int i = 0; i < ht_size; ++i) {
-    SEXP os = HEAP.bigObjectsHt->data[i];
-    if (os) {
-      BigObject* o = PTR2BIG(os);
-      o->mark = UNMARKED;
+    ObjHashtableEntry* e = &HEAP.bigObjectsHt->data[i];
+    if (e->entry) {
+      e->entry->sxpinfo.mark = UNMARKED;
+      e->mark = UNMARKED;
     }
   }
 }
 
-void free_unused_memory(unsigned bkt) {
+static R_INLINE R_size_t getVecSizeInVEC(SEXP);
+void free_unused_memory() {
   uint8_t M = THE_MARK;
   for (size_t s = 0; s < NUM_BUCKETS; ++s) {
     SizeBucket* bucket = &HEAP.sizeBucket[s];
@@ -931,20 +920,16 @@ void free_unused_memory(unsigned bkt) {
     findPageToSweep(bucket);
   }
 
-  if (bkt != NUM_BUCKETS && !fullCollection)
-    return;
-
   size_t ht_size = HEAP.bigObjectsHt->size * HASH_BUCKET_SIZE;
   for (int i = 0; i < ht_size; ++i) {
-    SEXP os = HEAP.bigObjectsHt->data[i];
-    if (os) {
-      BigObject* o = PTR2BIG(os);
-      if (o->mark < M) {
-        HEAP.size -= o->size;
-        ObjHashtable_remove(HEAP.bigObjectsHt, o->data);
-        ON_DEBUG(memset(o, 0xd0, o->size));
-        free(o);
-      }
+    ObjHashtableEntry* e = &HEAP.bigObjectsHt->data[i];
+    if (e->entry && e->mark < M) {
+      size_t sz = getVecSizeInVEC(e->entry) * sizeof(VECREC) + sizeof(VECTOR_SEXPREC);
+      HEAP.size -= sz;
+      ON_DEBUG(memset(e->entry, 0xd0, sz));
+      free(e->entry);
+      ObjHashtable_remove_el(HEAP.bigObjectsHt, i);
+      --i;
     }
   }
 }
@@ -1068,7 +1053,13 @@ void write_barrier_trigger(SEXP x, SEXP y) {
   // To avoid the barrier triggering multiple times we clear the old bit for as
   // long as the node is in the mark queue.
   x->sxpinfo.old = 0;
-  *GETMARK(x) = UNMARKED;
+  if (ISNODE(x)) {
+    PTR2PAGE(x)->mark[PTR2IDX(x)] = UNMARKED;
+  } else {
+    (x)->sxpinfo.mark = UNMARKED;
+    // The second mark bit in the ht does not need to be cleared, since the
+    // markIfUnmarked will set it again.
+  }
   PUSH_NODE(x);
   if (MSpos > WRITE_BARRIER_MS_TRIGGER)
     PROCESS_NODES();
