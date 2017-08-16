@@ -65,24 +65,28 @@ Rboolean fullCollection = FALSE;
 #define ENV_BUCKET 1
 #define PROM_BUCKET 2
 #define GENERIC_SEXP_BUCKET 3
-#define NUM_BUCKETS 18
-#define FIRST_GENERIC_BUCKET 4
+#define INT_BUCKET 4
+#define REAL_BUCKET 5
+#define LGL_BUCKET 6
+#define NUM_BUCKETS 25
+#define FIRST_GENERIC_BUCKET 7
 
 size_t BUCKET_SIZE[NUM_BUCKETS] = {
   40, 40, 40, 40,
-  32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256};
+  32, 32, 32,
+  32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256, 320, 384, 448, 512};
 
 #define INITIAL_PAGE_LIMIT 500
 #define FREE_PAGES_SLACK 50
 #define INITIAL_HEAP_LIMIT (10 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
-#define HEAP_GROW_RATE 1.5
-#define PAGES_GROW_RATE 1.4
+#define HEAP_GROW_RATE 1.3
+#define PAGES_GROW_RATE 1.3
 #define HEAP_SHRINK_RATE 0.8
-#define HEAP_SIZE_SLACK 0.8
+#define HEAP_SIZE_SLACK 0.75
 #define HEAP_SIZE_MAX_SLACK 0.35
-#define HEAP_PAGES_SLACK 0.78
-#define FULL_COLLECTION_TRIGGER 0.96
+#define HEAP_PAGES_SLACK 0.8
+#define FULL_COLLECTION_TRIGGER 0.94
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 2000
 #define INITIAL_MS_SIZE 4000
@@ -519,20 +523,27 @@ SEXP new_gc_allocVector3(SEXPTYPE type,
 
   /* Handle some scalars directly to improve speed. */
   if (length == 1) {
+    SEXP s;
     switch (type) {
       case REALSXP:
+        s = allocInBucket(REAL_BUCKET);
+        break;
       case INTSXP:
-      case LGLSXP: {
-        SEXP s = allocInBucket(FIRST_GENERIC_BUCKET);
-        ATTRIB(s) = R_NilValue;
-        SET_TYPEOF(s, type);
-        SET_SHORT_VEC_LENGTH(s, (R_len_t)length);  // is 1
-        SET_SHORT_VEC_TRUELENGTH(s, 0);
-        SET_NAMED(s, 0);
-        INIT_REFCNT(s);
-        return (s);
-      }
+        s = allocInBucket(INT_BUCKET);
+        break;
+      case LGLSXP:
+        s = allocInBucket(LGL_BUCKET);
+        break;
+      default:
+        return new_gc_allocVector3_slow(type, length);
     }
+    ATTRIB(s) = R_NilValue;
+    SET_TYPEOF(s, type);
+    SET_SHORT_VEC_LENGTH(s, (R_len_t)length);  // is 1
+    SET_SHORT_VEC_TRUELENGTH(s, 0);
+    SET_NAMED(s, 0);
+    INIT_REFCNT(s);
+    return s;
   }
   return new_gc_allocVector3_slow(type, length);
 }
