@@ -159,7 +159,7 @@ void ObjHashtable_grow(ObjHashtable** ht) {
 }
 
 FORCE_INLINE uint32_t ObjHashtable_h(void* k) {
-  uint32_t a = (uintptr_t)k;
+  uint32_t a = (uintptr_t)k >> 2;
   a = (a ^ 61) ^ (a >> 16);
   a = a + (a << 3);
   a = a ^ (a >> 4);
@@ -187,7 +187,7 @@ Rboolean ObjHashtable_add(ObjHashtable* ht, ObjHashtableEntry e) {
   return TRUE;
 }
 
-ObjHashtableEntry* ObjHashtable_get(ObjHashtable* ht, SEXP p) {
+FORCE_INLINE ObjHashtableEntry* ObjHashtable_get(ObjHashtable* ht, SEXP p) {
   long key = ObjHashtable_h(p);
   long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
   long el = 0;
