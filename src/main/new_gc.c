@@ -1064,8 +1064,8 @@ FORCE_INLINE void PROCESS_NODE(SEXP cur) {
   }
 }
 
-#define WRITE_BARRIER_PROMOTE
-// #define WRITE_BARRIER_BLACK_TO_WHITE
+// #define WRITE_BARRIER_PROMOTE
+#define WRITE_BARRIER_BLACK_TO_WHITE
 void write_barrier_trigger(SEXP x, SEXP y) {
 #ifdef WRITE_BARRIER_BLACK_TO_WHITE
   // To avoid the barrier triggering multiple times we clear the old bit for as
