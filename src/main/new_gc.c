@@ -81,10 +81,10 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
 #define FREE_PAGES_SLACK 50
 #define INITIAL_HEAP_LIMIT (10 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
-#define HEAP_GROW_RATE 1.3
+#define HEAP_GROW_RATE 1.2
 #define PAGES_GROW_RATE 1.3
 #define HEAP_SHRINK_RATE 0.8
-#define HEAP_SIZE_SLACK 0.75
+#define HEAP_SIZE_SLACK 0.77
 #define HEAP_SIZE_MAX_SLACK 0.35
 #define HEAP_PAGES_SLACK 0.8
 #define FULL_COLLECTION_TRIGGER 0.94
@@ -113,7 +113,7 @@ typedef struct Page {
    (uintptr_t)(s) < HEAP.pageArenaEnd)
 #define ISMARKED(s)                                      \
   (ISNODE(s) ? PTR2PAGE(s)->mark[PTR2IDX(s)] == THE_MARK \
-             : (s)->sxpinfo.mark == THE_MARK)
+             : ObjHashtable_get(HEAP.bigObjectsHt, (s))->mark == THE_MARK)
 #define NODE_IS_MARKED(s) ISMARKED(s)
 #define INIT_NODE(s) (*(uint32_t*)&((SEXP)(s))->sxpinfo = 0)
 
@@ -700,6 +700,13 @@ void heapStatistics() {
            available);
   }
   printf(" total in pages %d\n", pages_size / 1024 / 1024);
+  size_t osz = HEAP.bigObjectsHt->size * HASH_BUCKET_SIZE;
+  size_t bigObjs = 0;
+  for (size_t i = 0; i < osz; ++i) {
+    if (HEAP.bigObjectsHt->data[i].entry != NULL)
+      bigObjs++;
+  }
+  printf(" big objects count %d\n", bigObjs);
   size_t freePages = 0;
   size_t freeCommitedPages = 0;
   size_t freePageBuckets = 0;
@@ -750,9 +757,9 @@ void updatePageMark(Page* p) {
       { what; }                                                        \
     }                                                                  \
   } else {                                                             \
-    if ((s)->sxpinfo.mark < THE_MARK) {                                \
-      (s)->sxpinfo.mark = THE_MARK;                                    \
-      ObjHashtable_get(HEAP.bigObjectsHt, s)->mark = THE_MARK;         \
+    ObjHashtableEntry* e = ObjHashtable_get(HEAP.bigObjectsHt, s);     \
+    if ((s)->sxpinfo.old == 0 || e->mark < THE_MARK) {                 \
+      e->mark = THE_MARK;                                              \
       { what; }                                                        \
     }                                                                  \
   }
@@ -889,7 +896,6 @@ void clear_marks() {
   for (int i = 0; i < ht_size; ++i) {
     ObjHashtableEntry* e = &HEAP.bigObjectsHt->data[i];
     if (e->entry) {
-      e->entry->sxpinfo.mark = UNMARKED;
       e->mark = UNMARKED;
     }
   }
@@ -1075,9 +1081,7 @@ void write_barrier_trigger(SEXP x, SEXP y) {
   if (ISNODE(x)) {
     PTR2PAGE(x)->mark[PTR2IDX(x)] = UNMARKED;
   } else {
-    (x)->sxpinfo.mark = UNMARKED;
-    // The second mark bit in the ht does not need to be cleared, since the
-    // markIfUnmarked will set it again.
+    ObjHashtable_get(HEAP.bigObjectsHt, x)->mark = UNMARKED;
   }
   PUSH_NODE(x);
 #endif
