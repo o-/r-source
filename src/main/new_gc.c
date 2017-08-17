@@ -68,13 +68,13 @@ Rboolean fullCollection = FALSE;
 #define INT_BUCKET 4
 #define REAL_BUCKET 5
 #define LGL_BUCKET 6
-#define NUM_BUCKETS 25
+#define NUM_BUCKETS 26
 #define FIRST_GENERIC_BUCKET 7
 
 size_t BUCKET_SIZE[NUM_BUCKETS] = {
   40, 40, 40, 40,
   32, 32, 32,
-  32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 128, 160, 192, 256, 320, 384, 448, 512};
+  32, 40, 48, 56, 64, 72, 80, 88, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512};
 
 #define INITIAL_PAGE_LIMIT 500
 #define FREE_PAGES_SLACK 50
@@ -936,6 +936,10 @@ void free_unused_memory() {
     ObjHashtableEntry* e = &HEAP.bigObjectsHt->data[i];
     if (e->entry && e->mark < M) {
       size_t sz = getVecSizeInVEC(e->entry) * sizeof(VECREC) + sizeof(VECTOR_SEXPREC);
+#ifdef LONG_VECTOR_SUPPORT
+      if (XLENGTH(e->entry) > R_SHORT_LEN_MAX)
+        sz += sizeof(R_long_vec_hdr_t);
+#endif
       HEAP.size -= sz;
       ON_DEBUG(memset(e->entry, 0xd0, sz));
       free(e->entry);
@@ -1060,7 +1064,10 @@ FORCE_INLINE void PROCESS_NODE(SEXP cur) {
   }
 }
 
+#define WRITE_BARRIER_PROMOTE
+// #define WRITE_BARRIER_BLACK_TO_WHITE
 void write_barrier_trigger(SEXP x, SEXP y) {
+#ifdef WRITE_BARRIER_BLACK_TO_WHITE
   // To avoid the barrier triggering multiple times we clear the old bit for as
   // long as the node is in the mark queue.
   x->sxpinfo.old = 0;
@@ -1072,6 +1079,10 @@ void write_barrier_trigger(SEXP x, SEXP y) {
     // markIfUnmarked will set it again.
   }
   PUSH_NODE(x);
+#endif
+#ifdef WRITE_BARRIER_PROMOTE
+  PUSH_NODE(y);
+#endif
   if (MSpos > WRITE_BARRIER_MS_TRIGGER)
     PROCESS_NODES();
 }
