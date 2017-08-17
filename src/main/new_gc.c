@@ -68,13 +68,14 @@ Rboolean fullCollection = FALSE;
 #define INT_BUCKET 4
 #define REAL_BUCKET 5
 #define LGL_BUCKET 6
-#define NUM_BUCKETS 26
+// GCC f* up of more than 25!
+#define NUM_BUCKETS 25
 #define FIRST_GENERIC_BUCKET 7
 
 size_t BUCKET_SIZE[NUM_BUCKETS] = {
   40, 40, 40, 40,
   32, 32, 32,
-  32, 40, 48, 56, 64, 72, 80, 88, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512};
+  32, 40, 48, 56, 64, 72, 80, 88, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448};
 
 #define INITIAL_PAGE_LIMIT 500
 #define FREE_PAGES_SLACK 50
@@ -1064,8 +1065,8 @@ FORCE_INLINE void PROCESS_NODE(SEXP cur) {
   }
 }
 
-// #define WRITE_BARRIER_PROMOTE
-#define WRITE_BARRIER_BLACK_TO_WHITE
+#define WRITE_BARRIER_PROMOTE
+// #define WRITE_BARRIER_BLACK_TO_WHITE
 void write_barrier_trigger(SEXP x, SEXP y) {
 #ifdef WRITE_BARRIER_BLACK_TO_WHITE
   // To avoid the barrier triggering multiple times we clear the old bit for as
