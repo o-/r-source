@@ -93,8 +93,8 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 2000
 #define INITIAL_MS_SIZE 4000
-#define GC_TIME_TRESHOLD 0.12
-#define GC_TIME_PRESSURE 1.15
+#define GC_TIME_TRESHOLD 0.1
+#define GC_TIME_PRESSURE 1.3
 
 typedef struct Page {
   uint8_t mark[MAX_IDX];
