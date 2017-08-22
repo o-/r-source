@@ -94,7 +94,7 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
 #define MS_TRIGGER 2000
 #define INITIAL_MS_SIZE 4000
 #define GC_TIME_TRESHOLD 0.1
-#define GC_TIME_PRESSURE 1.8
+#define GC_TIME_PRESSURE 0.9
 
 typedef struct Page {
   uint8_t mark[MAX_IDX];
@@ -888,13 +888,15 @@ void attribute_hidden doGc2(unsigned bkt) {
   double gc_time = toMS(&last_gc) - toMS(&gc_start);
   double gc_alloc_ratio = gc_time/allocator_time;
 
+  double heap_slack_needed = HEAP_SIZE_SLACK;
+  double page_slack_needed = HEAP_PAGES_SLACK;
   if (gc_alloc_ratio > GC_TIME_TRESHOLD) {
-    heapPressure *= GC_TIME_PRESSURE;
-    pagePressure *= GC_TIME_PRESSURE;
+    heap_slack_needed *= GC_TIME_PRESSURE;
+    page_slack_needed *= GC_TIME_PRESSURE;
   }
 
   Rboolean oversize = FALSE;
-  if (heapPressure > HEAP_SIZE_SLACK && fullCollection) {
+  if (heapPressure > heap_slack_needed && fullCollection) {
     HEAP.heapLimit *= HEAP_GROW_RATE;
     if (HEAP.size > HEAP.heapLimit) {
       oversize = TRUE;
@@ -908,7 +910,7 @@ void attribute_hidden doGc2(unsigned bkt) {
     HEAP.heapLimit *= HEAP_SHRINK_RATE;
   }
 
-  if (pagePressure > HEAP_PAGES_SLACK && fullCollection) {
+  if (pagePressure > page_slack_needed && fullCollection) {
     HEAP.page_limit *= PAGES_GROW_RATE;
 #ifdef GCPROF
     printf("Growing page limit to %d\n", HEAP.page_limit);
