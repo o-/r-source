@@ -831,6 +831,11 @@ void attribute_hidden doGc2(unsigned bkt) {
 
   // clear mark bits
   if (fullCollection) {
+    // Normally we do not trigger the write barrier if we are doing a full
+    // GC anyway. But if the full GC is triggered by some external request
+    // (e.g. calling gc() from R) then there might still be some things left
+    // on the mark stack.
+    MSpos = 0;
     if (THE_MARK == 0xff) {
       clear_marks();
       THE_MARK = 1;
@@ -1334,6 +1339,7 @@ void attribute_hidden ATTRIB_WRITE_BARRIER(SEXP x, SEXP y) {
     intProtect[0] = (p1);             \
     intProtect[1] = (p2);             \
     (s) = allocInBucket(CONS_BUCKET); \
+    intProtect[0] = intProtect[1] = NULL; \
   } while (0)
 
 #define ALLOC_ENV(s, p1, p2, p3)     \
@@ -1342,6 +1348,7 @@ void attribute_hidden ATTRIB_WRITE_BARRIER(SEXP x, SEXP y) {
     intProtect[1] = (p2);            \
     intProtect[2] = (p3);            \
     (s) = allocInBucket(ENV_BUCKET); \
+    intProtect[0] = intProtect[1] = intProtect[2] = NULL; \
   } while (0)
 
 #define ALLOC_PROM(s, p1, p2)         \
@@ -1349,6 +1356,7 @@ void attribute_hidden ATTRIB_WRITE_BARRIER(SEXP x, SEXP y) {
     intProtect[0] = (p1);             \
     intProtect[1] = (p2);             \
     (s) = allocInBucket(PROM_BUCKET); \
+    intProtect[0] = intProtect[1] = NULL; \
   } while (0)
 
 
