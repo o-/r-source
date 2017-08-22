@@ -113,6 +113,8 @@ static int gc_count = 0;
 /* These are used in profiling to separate out time in GC */
 int R_gc_running() { return R_in_gc; }
 
+#define R_MAX(a,b) (a) < (b) ? (b) : (a)
+
 #ifdef TESTING_WRITE_BARRIER
 # define PROTECTCHECK
 #endif
@@ -270,6 +272,9 @@ static SEXP R_PreciousList = NULL;      /* List of Persistent Objects */
 
 static R_size_t R_N_maxused=0;
 static R_size_t R_V_maxused=0;
+
+static void gc_start_timing(void);
+static void gc_end_timing(void);
 
 #include "new_gc.c"
 
@@ -888,7 +893,7 @@ void attribute_hidden InitMemory()
 #if VALGRIND_LEVEL > 1
     VALGRIND_MAKE_MEM_NOACCESS(R_PPStack+R_PPStackSize, PP_REDZONE_SIZE);
 #endif
-    vsfac = sizeof(VECREC);
+    vsfac = 1; //sizeof(VECREC);
     R_VSize = (R_VSize + 1)/vsfac;
     if (R_MaxVSize < R_SIZE_T_MAX) R_MaxVSize = (R_MaxVSize + 1)/vsfac;
 
@@ -1348,127 +1353,9 @@ static void gc_end_timing(void)
     }
 }
 
-#define R_MAX(a,b) (a) < (b) ? (b) : (a)
-
 static void R_gc_internal(R_size_t size_needed)
 {
-    if (!R_GCEnabled) {
-      if (HEAP.num_pages == HEAP.page_limit) {
-        HEAP.page_limit++;
-        R_NSize = HEAP.page_limit * nodesPerPage();
-      }
-      if (size_needed > HEAP.heapLimit - HEAP.size) {
-        HEAP.heapLimit += size_needed - (HEAP.heapLimit - HEAP.size);
-        R_VSize = HEAP.heapLimit;
-      }
-      gc_pending = TRUE;
-      return;
-    }
-    gc_pending = FALSE;
-
-    double ncells, vcells, vfrac, nfrac;
-    SEXPTYPE first_bad_sexp_type = 0;
-#ifdef PROTECTCHECK
-    SEXPTYPE first_bad_sexp_type_old_type = 0;
-#endif
-    SEXP first_bad_sexp_type_sexp = NULL;
-    int first_bad_sexp_type_line = 0;
-
-#ifdef IMMEDIATE_FINALIZERS
-    Rboolean first = TRUE;
- again:
-#endif
-
-    gc_count++;
-
-    R_N_maxused = R_MAX(R_N_maxused, nodesNumber());
-    R_V_maxused = R_MAX(R_V_maxused, vheapUsed());
-
-    BEGIN_SUSPEND_INTERRUPTS {
-	R_in_gc = TRUE;
-	gc_start_timing();
-	doGc(NUM_BUCKETS);
-	gc_end_timing();
-	R_in_gc = FALSE;
-    } END_SUSPEND_INTERRUPTS;
-
-    if (bad_sexp_type_seen != 0 && first_bad_sexp_type == 0) {
-	first_bad_sexp_type = bad_sexp_type_seen;
-#ifdef PROTECTCHECK
-	first_bad_sexp_type_old_type = bad_sexp_type_old_type;
-#endif
-	first_bad_sexp_type_sexp = bad_sexp_type_sexp;
-	first_bad_sexp_type_line = bad_sexp_type_line;
-    }
-
-    if (gc_reporting) {
-	ncells = nodesNumber();
-	nfrac = (100.0 * ncells) / R_NSize;
-	/* We try to make this consistent with the results returned by gc */
-	ncells = 0.1*ceil(10*ncells * sizeof(SEXPREC)/Mega);
-	REprintf("\n%.1f Mbytes of cons cells used (%d%%)\n",
-		 ncells, (int) (nfrac + 0.5));
-	vcells = vheapUsed();
-	vfrac = (100.0 * vcells) / R_VSize;
-	vcells = 0.1*ceil(10*vcells * vsfac/Mega);
-	REprintf("%.1f Mbytes of vectors used (%d%%)\n",
-		 vcells, (int) (vfrac + 0.5));
-    }
-
-#ifdef IMMEDIATE_FINALIZERS
-    if (first) {
-	first = FALSE;
-	/* Run any eligible finalizers.  The return result of
-	   RunFinalizers is TRUE if any finalizers are actually run.
-	   There is a small chance that running finalizers here may
-	   chew up enough memory to make another immediate collection
-	   necessary.  If so, we jump back to the beginning and run
-	   the collection, but on this second pass we do not run
-	   finalizers. */
-	if (RunFinalizers() &&
-	    (NO_FREE_NODES() || size_needed > VHEAP_FREE()))
-	    goto again;
-    }
-#endif
-
-    if (first_bad_sexp_type != 0) {
-#ifdef PROTECTCHECK
-	if (first_bad_sexp_type == FREESXP)
-	    error("GC encountered a node (%p) with type FREESXP (was %s)"
-		  " at memory.c:%d",
-		  first_bad_sexp_type_sexp,
-		  sexptype2char(first_bad_sexp_type_old_type),
-		  first_bad_sexp_type_line);
-	else
-	    error("GC encountered a node (%p) with an unknown SEXP type: %s"
-		  " at memory.c:%d",
-		  first_bad_sexp_type_sexp,
-		  sexptype2char(first_bad_sexp_type),
-		  first_bad_sexp_type_line);
-#else
-	error("GC encountered a node (%p) with an unknown SEXP type: %s"
-	      " at memory.c:%d",
-	      first_bad_sexp_type_sexp,
-	      sexptype2char(first_bad_sexp_type),
-	      first_bad_sexp_type_line);
-#endif
-    }
-
-    /* sanity check on logical scalar values */
-    if (R_TrueValue != NULL && LOGICAL(R_TrueValue)[0] != TRUE) {
-	LOGICAL(R_TrueValue)[0] = TRUE;
-	error("internal TRUE value has been modified");
-    }
-    if (R_FalseValue != NULL && LOGICAL(R_FalseValue)[0] != FALSE) {
-	LOGICAL(R_FalseValue)[0] = FALSE;
-	error("internal FALSE value has been modified");
-    }
-    if (R_LogicalNAValue != NULL &&
-	LOGICAL(R_LogicalNAValue)[0] != NA_LOGICAL) {
-	LOGICAL(R_LogicalNAValue)[0] = NA_LOGICAL;
-	error("internal logical NA value has been modified");
-    }
-    /* compiler constants are checked in RunGenCollect */
+  doGc(NUM_BUCKETS, size_needed);
 }
 
 

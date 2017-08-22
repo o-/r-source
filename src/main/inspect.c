@@ -83,6 +83,13 @@ static void inspect_tree(int pre, SEXP v, int deep, int pvec) {
 
        It is invalid on 64-bit Windows.
     */
+#ifdef _WIN64
+    Rprintf("@%p %02d %s g%d [", v, TYPEOF(v), typename(v),
+        v->sxpinfo.old);
+#else
+    Rprintf("@%lx %02d %s g%d [", (long) v, TYPEOF(v), typename(v),
+        v->sxpinfo.old);
+#endif
     if (OBJECT(v)) { a = 1; Rprintf("OBJ"); }
 #ifndef SWITCH_TO_REFCNT
     if (NAMED(v)) { if (a) Rprintf(","); Rprintf("NAM(%d)",NAMED(v)); a = 1; }

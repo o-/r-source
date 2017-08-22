@@ -58,7 +58,9 @@
 #define UNMARKED 0
 uint8_t THE_MARK = 1;
 
-static size_t gc_cnt = 0;
+#include <time.h>
+struct timespec last_gc;
+
 Rboolean fullCollection = FALSE;
 
 #define CONS_BUCKET 0
@@ -91,6 +93,8 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 2000
 #define INITIAL_MS_SIZE 4000
+#define GC_TIME_TRESHOLD 0.12
+#define GC_TIME_PRESSURE 1.15
 
 typedef struct Page {
   uint8_t mark[MAX_IDX];
@@ -117,7 +121,7 @@ typedef struct Page {
 #define NODE_IS_MARKED(s) ISMARKED(s)
 #define INIT_NODE(s) (*(uint32_t*)&((SEXP)(s))->sxpinfo = 0)
 
-void doGc(unsigned);
+void doGc(unsigned, size_t);
 void free_unused_memory();
 
 typedef struct SizeBucket {
@@ -168,7 +172,7 @@ size_t TSsize = 0;
 #endif
 
 int heapIsInitialized = 0;
-void new_gc_initHeap() {
+void attribute_hidden new_gc_initHeap() {
   for (size_t i = 0; i < NUM_BUCKETS; ++i) {
     SizeBucket* bucket = &HEAP.sizeBucket[i];
     bucket->to_bump = bucket->to_sweep = NULL;
@@ -204,6 +208,7 @@ void new_gc_initHeap() {
   TSsize = INITIAL_MS_SIZE;
 #endif
   heapIsInitialized = 1;
+  clock_gettime(CLOCK_MONOTONIC, &last_gc);
 }
 
 SEXP alloc(size_t sz);
@@ -212,7 +217,7 @@ void* allocBigObj(size_t sexp_sz) {
   size_t sz = sexp_sz;
 
   if (gc_pending || HEAP.size + sz > HEAP.heapLimit)
-    doGc(NUM_BUCKETS);
+    doGc(NUM_BUCKETS, sz);
 
   SEXP data = (SEXP)malloc(sz);
   if (data == NULL)
@@ -230,7 +235,7 @@ void* allocBigObj(size_t sexp_sz) {
   return data;
 }
 
-void verifyPage(Page* page) {
+void attribute_hidden verifyPage(Page* page) {
   uintptr_t pos = page->start;
   size_t last_idx = -1;
   while (pos != page->end) {
@@ -295,7 +300,7 @@ Page* allocPage(unsigned bkt) {
   return page;
 }
 
-void growBucket(unsigned bkt) {
+void attribute_hidden growBucket(unsigned bkt) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   Page* page = allocPage(bkt);
 
@@ -323,7 +328,7 @@ void growBucket(unsigned bkt) {
 
 void findPageToSweep(SizeBucket* bucket);
 
-void deletePage(SizeBucket* bucket, Page* p) {
+void attribute_hidden deletePage(SizeBucket* bucket, Page* p) {
   HEAP.size -= p->end - p->start;
   CHECK(bucket->num_pages > 0);
   bucket->num_pages--;
@@ -355,7 +360,7 @@ void deletePage(SizeBucket* bucket, Page* p) {
 #endif
 }
 
-void findPageToSweep(SizeBucket* bucket) {
+void attribute_hidden findPageToSweep(SizeBucket* bucket) {
   size_t l = bucket->pagesHt->size * HASH_BUCKET_SIZE;
   size_t i = bucket->sweep_idx;
   for (; i < l; ++i) {
@@ -390,7 +395,7 @@ void* slowAllocInBucket(unsigned bkt) {
   SizeBucket* bucket = &HEAP.sizeBucket[bkt];
   if (gc_pending || HEAP.num_pages >= HEAP.page_limit ||
       HEAP.size + PAGE_SIZE > HEAP.heapLimit) {
-    doGc(bkt);
+    doGc(bkt, PAGE_SIZE);
     // TODO: something a more sane...
     return sweepAllocInBucket(bkt, bucket);
   }
@@ -413,7 +418,7 @@ void* slowAllocInBucket(unsigned bkt) {
 
 #define IDX2PTR(p, i) ((uintptr_t)(p) + ((i) << PAGE_IDX_BITS))
 
-void finishSweep(SizeBucket* bucket, Page* page) {
+void attribute_hidden finishSweep(SizeBucket* bucket, Page* page) {
   PageHashtableEntry* e = PageHashtable_get(bucket->pagesHt, page);
   if ((double)page->reclaimed_nodes / (double)page->available_nodes <=
       PAGE_FULL_TRESHOLD && e->state == MARKED)
@@ -500,7 +505,7 @@ FORCE_INLINE void* allocInBucket(unsigned bkt) {
   return res;
 }
 
-SEXP alloc(size_t sz) {
+SEXP attribute_hidden alloc(size_t sz) {
   unsigned bkt = FIRST_GENERIC_BUCKET;
   while (bkt < NUM_BUCKETS && BUCKET_SIZE[bkt] < sz)
     ++bkt;
@@ -516,7 +521,7 @@ SEXP alloc(size_t sz) {
 #define intCHARSXP 73
 SEXP new_gc_allocVector3_slow(SEXPTYPE type, R_xlen_t length);
 
-SEXP new_gc_allocVector3(SEXPTYPE type,
+SEXP attribute_hidden new_gc_allocVector3(SEXPTYPE type,
                          R_xlen_t length,
                          R_allocator_t* allocator) {
   if (allocator != NULL)
@@ -549,7 +554,7 @@ SEXP new_gc_allocVector3(SEXPTYPE type,
   return new_gc_allocVector3_slow(type, length);
 }
 
-SEXP new_gc_allocVector3_slow(SEXPTYPE type, R_xlen_t length) {
+SEXP attribute_hidden new_gc_allocVector3_slow(SEXPTYPE type, R_xlen_t length) {
   if (length > R_XLEN_T_MAX)
     error(_("vector is too large")); /**** put length into message */
   else if (length < 0)
@@ -664,17 +669,17 @@ SEXP new_gc_allocVector3_slow(SEXPTYPE type, R_xlen_t length) {
   return s;
 }
 
-double heap_pressure() {
+double attribute_hidden heap_pressure() {
   return (double)HEAP.size / (double)HEAP.heapLimit;
 }
-double page_pressure() {
+double attribute_hidden page_pressure() {
   return (double)(HEAP.num_pages) / (double)HEAP.page_limit;
 }
 
 void finish_sweep();
-void heapStatistics() {
+void attribute_hidden heapStatistics() {
   printf("HEAP statistics after gc %d of gen %d: size %d / %d (%f), pages %d / %d (%f)\n",
-         gc_cnt,
+         gc_count,
          fullCollection,
          HEAP.size / 1024 / 1024,
          HEAP.heapLimit / 1024 / 1024,
@@ -723,15 +728,15 @@ void heapStatistics() {
   printf(" Page freelist has %d buckets with %d entries of which %d are commited\n", freePageBuckets, freePages, freeCommitedPages);
 }
 
-size_t bucketPageAvailableNodes(unsigned bkt) {
+size_t attribute_hidden bucketPageAvailableNodes(unsigned bkt) {
   return (PAGE_SIZE - sizeof(Page)) / BUCKET_SIZE[bkt];
 }
 
-size_t nodesPerPage() {
+size_t attribute_hidden nodesPerPage() {
   return bucketPageAvailableNodes(CONS_BUCKET);
 }
 
-size_t largeVallocSize() {
+size_t attribute_hidden largeVallocSize() {
   size_t total = 0;
   for (size_t i = 0; i < NUM_BUCKETS; ++i) {
     total += HEAP.sizeBucket[i].num_pages *
@@ -740,7 +745,7 @@ size_t largeVallocSize() {
   return HEAP.size - total;
 }
 
-size_t smallVallocSize() {
+size_t attribute_hidden smallVallocSize() {
   size_t total = 0;
   for (size_t i = FIRST_GENERIC_BUCKET; i < NUM_BUCKETS; ++i) {
     total += HEAP.sizeBucket[i].num_pages *
@@ -749,7 +754,7 @@ size_t smallVallocSize() {
   return total;
 }
 
-size_t nodesNumber() {
+size_t attribute_hidden nodesNumber() {
   size_t total = 0;
   for (size_t i = 0; i < FIRST_GENERIC_BUCKET; ++i) {
     total += HEAP.sizeBucket[i].num_pages * bucketPageAvailableNodes(i);
@@ -757,7 +762,7 @@ size_t nodesNumber() {
   return total;
 }
 
-size_t vheapUsed() {
+size_t attribute_hidden vheapUsed() {
   return HEAP.size - nodesNumber() * sizeof(SEXPREC);
 }
 
@@ -765,9 +770,7 @@ static void traceHeap();
 void traceStack();
 FORCE_INLINE void PROCESS_NODE(SEXP);
 
-#include <time.h>
-
-double toMS(struct timespec* ts) {
+double attribute_hidden toMS(struct timespec* ts) {
   return (double)ts->tv_sec * 1000L + (double)ts->tv_nsec / 1000000.0;
 }
 
@@ -778,7 +781,7 @@ SEXP intProtect[3] = {NULL, NULL, NULL};
 FORCE_INLINE void PROCESS_NODES();
 FORCE_INLINE void PUSH_NODE(SEXP);
 
-void updatePageMark(Page* p) {
+void attribute_hidden updatePageMark(Page* p) {
   PageHashtable_get(HEAP.sizeBucket[p->bkt].pagesHt, p)->last_mark = THE_MARK;
   p->last_mark = THE_MARK;
 }
@@ -805,7 +808,13 @@ void updatePageMark(Page* p) {
 void clear_marks();
 void processStackNodes();
 
-void doGc(unsigned bkt) {
+
+void attribute_hidden doGc2(unsigned bkt) {
+
+  struct timespec gc_start;
+  clock_gettime(CLOCK_MONOTONIC, &gc_start);
+  double allocator_time = toMS(&gc_start) - toMS(&last_gc);
+
 #ifdef GCPROF
   struct timespec time1, time11, time2, time3, time4;
   marked = 0;
@@ -862,14 +871,23 @@ void doGc(unsigned bkt) {
 #endif
 
   free_unused_memory();
-  gc_cnt++;
 #if GCPROF
-  if (fullCollection || gc_cnt % 10 == 0)
+  if (fullCollection || gc_count % 10 == 0)
     heapStatistics();
 #endif
 
   double heapPressure = heap_pressure();
   double pagePressure = page_pressure();
+
+  clock_gettime(CLOCK_MONOTONIC, &last_gc);
+  double gc_time = toMS(&last_gc) - toMS(&gc_start);
+  double gc_alloc_ratio = gc_time/allocator_time;
+
+  if (gc_alloc_ratio > GC_TIME_TRESHOLD) {
+    heapPressure *= GC_TIME_PRESSURE;
+    pagePressure *= GC_TIME_PRESSURE;
+  }
+
   Rboolean oversize = FALSE;
   if (heapPressure > HEAP_SIZE_SLACK && fullCollection) {
     HEAP.heapLimit *= HEAP_GROW_RATE;
@@ -902,7 +920,7 @@ void doGc(unsigned bkt) {
   printf(
       "Gc %d (%d) of gen %d : took %f for ss, %f to clear, %f to mark %d, %f to free, "
       "total %fms\n",
-      gc_cnt,
+      gc_count,
       bkt,
       fullCollection,
       toMS(&time11) - toMS(&time1),
@@ -913,14 +931,134 @@ void doGc(unsigned bkt) {
       marked);
 #endif
 
+  if (gc_reporting) {
+    REprintf("Garbage collection %d%s took %.1fms (%.0f%%)\n",
+        gc_count, fullCollection ? " (full)" : "", gc_time, gc_alloc_ratio*100.0);
+    REprintf(" Heap occupancy %.1fM/%.1fM (%.2f) with %d/%d (%.2f) pages\n",
+        (double)HEAP.size / 1024.0 / 1024.0,
+        (double)HEAP.heapLimit / 1024.0 / 1024.0,
+        heap_pressure(),
+        HEAP.num_pages,
+        HEAP.page_limit,
+        page_pressure());
+  }
+
   fullCollection =
     heapPressure > FULL_COLLECTION_TRIGGER ||
     pagePressure > FULL_COLLECTION_TRIGGER ||
     oversize;
 
+
+  gc_count++;
 }
 
-void clear_marks() {
+void attribute_hidden doGc(unsigned bkt, R_size_t size_needed)
+{
+    if (!R_GCEnabled) {
+      if (HEAP.num_pages == HEAP.page_limit) {
+        HEAP.page_limit++;
+        R_NSize = HEAP.page_limit * nodesPerPage();
+      }
+      if (size_needed > HEAP.heapLimit - HEAP.size) {
+        HEAP.heapLimit += size_needed - (HEAP.heapLimit - HEAP.size);
+        R_VSize = HEAP.heapLimit;
+      }
+      gc_pending = TRUE;
+      return;
+    }
+    gc_pending = FALSE;
+
+    double ncells, vcells, vfrac, nfrac;
+    SEXPTYPE first_bad_sexp_type = 0;
+#ifdef PROTECTCHECK
+    SEXPTYPE first_bad_sexp_type_old_type = 0;
+#endif
+    SEXP first_bad_sexp_type_sexp = NULL;
+    int first_bad_sexp_type_line = 0;
+
+#ifdef IMMEDIATE_FINALIZERS
+    Rboolean first = TRUE;
+ again:
+#endif
+
+    R_N_maxused = R_MAX(R_N_maxused, nodesNumber());
+    R_V_maxused = R_MAX(R_V_maxused, vheapUsed());
+
+    BEGIN_SUSPEND_INTERRUPTS {
+	R_in_gc = TRUE;
+	gc_start_timing();
+	doGc2(bkt);
+	gc_end_timing();
+	R_in_gc = FALSE;
+    } END_SUSPEND_INTERRUPTS;
+
+    if (bad_sexp_type_seen != 0 && first_bad_sexp_type == 0) {
+	first_bad_sexp_type = bad_sexp_type_seen;
+#ifdef PROTECTCHECK
+	first_bad_sexp_type_old_type = bad_sexp_type_old_type;
+#endif
+	first_bad_sexp_type_sexp = bad_sexp_type_sexp;
+	first_bad_sexp_type_line = bad_sexp_type_line;
+    }
+
+#ifdef IMMEDIATE_FINALIZERS
+    if (first) {
+	first = FALSE;
+	/* Run any eligible finalizers.  The return result of
+	   RunFinalizers is TRUE if any finalizers are actually run.
+	   There is a small chance that running finalizers here may
+	   chew up enough memory to make another immediate collection
+	   necessary.  If so, we jump back to the beginning and run
+	   the collection, but on this second pass we do not run
+	   finalizers. */
+	if (RunFinalizers() &&
+	    (NO_FREE_NODES() || size_needed > VHEAP_FREE()))
+	    goto again;
+    }
+#endif
+
+    if (first_bad_sexp_type != 0) {
+#ifdef PROTECTCHECK
+	if (first_bad_sexp_type == FREESXP)
+	    error("GC encountered a node (%p) with type FREESXP (was %s)"
+		  " at memory.c:%d",
+		  first_bad_sexp_type_sexp,
+		  sexptype2char(first_bad_sexp_type_old_type),
+		  first_bad_sexp_type_line);
+	else
+	    error("GC encountered a node (%p) with an unknown SEXP type: %s"
+		  " at memory.c:%d",
+		  first_bad_sexp_type_sexp,
+		  sexptype2char(first_bad_sexp_type),
+		  first_bad_sexp_type_line);
+#else
+	error("GC encountered a node (%p) with an unknown SEXP type: %s"
+	      " at memory.c:%d",
+	      first_bad_sexp_type_sexp,
+	      sexptype2char(first_bad_sexp_type),
+	      first_bad_sexp_type_line);
+#endif
+    }
+
+    /* sanity check on logical scalar values */
+    if (R_TrueValue != NULL && LOGICAL(R_TrueValue)[0] != TRUE) {
+	LOGICAL(R_TrueValue)[0] = TRUE;
+	error("internal TRUE value has been modified");
+    }
+    if (R_FalseValue != NULL && LOGICAL(R_FalseValue)[0] != FALSE) {
+	LOGICAL(R_FalseValue)[0] = FALSE;
+	error("internal FALSE value has been modified");
+    }
+    if (R_LogicalNAValue != NULL &&
+	LOGICAL(R_LogicalNAValue)[0] != NA_LOGICAL) {
+	LOGICAL(R_LogicalNAValue)[0] = NA_LOGICAL;
+	error("internal logical NA value has been modified");
+    }
+    /* compiler constants are checked in RunGenCollect */
+}
+
+
+void attribute_hidden clear_marks() {
   for (size_t s = 0; s < NUM_BUCKETS; ++s) {
     SizeBucket* bucket = &HEAP.sizeBucket[s];
 
@@ -1015,13 +1153,13 @@ static inline void FORWARD_NODE(SEXP s) {
     PROCESS_NODES();
 }
 
-FORCE_INLINE void PROCESS_NODES() {
+FORCE_INLINE void attribute_hidden PROCESS_NODES() {
   while (MSpos > 0) {
     PROCESS_NODE(MarkStack[--MSpos]);
   }
 }
 
-void growMarkStack() {
+void attribute_hidden growMarkStack() {
   size_t old_size = MSsize*sizeof(SEXP);
   MSsize *= 1.5;
   size_t new_size = MSsize*sizeof(SEXP);
@@ -1031,7 +1169,7 @@ void growMarkStack() {
   MarkStack = newMS;
 }
 
-FORCE_INLINE void PUSH_NODE(SEXP s) {
+FORCE_INLINE void attribute_hidden PUSH_NODE(SEXP s) {
   if (s == NULL || s == R_NilValue)
     return;
   if (MSpos >= MSsize) {
@@ -1049,7 +1187,7 @@ FORCE_INLINE void PUSH_NODE(SEXP s) {
   if ((s)->sxpinfo.old != 1)      \
     (s)->sxpinfo.old = 1
 
-FORCE_INLINE void PROCESS_NODE(SEXP cur) {
+FORCE_INLINE void attribute_hidden PROCESS_NODE(SEXP cur) {
   SEXP attrib = ATTRIB(cur);
   switch (TYPEOF(cur)) {
     case CHARSXP:
@@ -1119,7 +1257,7 @@ FORCE_INLINE void PROCESS_NODE(SEXP cur) {
 
 // #define WRITE_BARRIER_PROMOTE
 #define WRITE_BARRIER_BLACK_TO_WHITE
-void write_barrier_trigger(SEXP x, SEXP y) {
+void attribute_hidden write_barrier_trigger(SEXP x, SEXP y) {
 #ifdef WRITE_BARRIER_BLACK_TO_WHITE
   // To avoid the barrier triggering multiple times we clear the old bit for as
   // long as the node is in the mark queue.
@@ -1143,7 +1281,7 @@ void write_barrier_trigger(SEXP x, SEXP y) {
     write_barrier_trigger(x, y);                                  \
   }
 
-void ATTRIB_WRITE_BARRIER(SEXP x, SEXP y) {
+void attribute_hidden ATTRIB_WRITE_BARRIER(SEXP x, SEXP y) {
   switch (TYPEOF(x)) {
   case CHARSXP:
   case NILSXP:
