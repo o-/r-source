@@ -95,6 +95,10 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
 #define INITIAL_MS_SIZE 4000
 #define GC_TIME_TRESHOLD 0.1
 #define GC_TIME_PRESSURE 0.97
+#define GROW_TRIGGER_MINOR_COLLECTIONS 5
+#define GROW_TRIGGER_MINOR_SLACK 0.85
+
+size_t last_full_collection = 0;
 
 typedef struct Page {
   uint8_t mark[MAX_IDX];
@@ -831,6 +835,7 @@ void attribute_hidden doGc2(unsigned bkt) {
 
   // clear mark bits
   if (fullCollection) {
+    last_full_collection = 0;
     // Normally we do not trigger the write barrier if we are doing a full
     // GC anyway. But if the full GC is triggered by some external request
     // (e.g. calling gc() from R) then there might still be some things left
@@ -895,8 +900,12 @@ void attribute_hidden doGc2(unsigned bkt) {
     page_slack_needed *= GC_TIME_PRESSURE;
   }
 
+  Rboolean allow_grow = fullCollection ||
+      (last_full_collection > GROW_TRIGGER_MINOR_COLLECTIONS &&
+       heapPressure > GROW_TRIGGER_MINOR_SLACK);
+
   Rboolean oversize = FALSE;
-  if (heapPressure > heap_slack_needed && fullCollection) {
+  if (heapPressure > heap_slack_needed && allow_grow) {
     HEAP.heapLimit *= HEAP_GROW_RATE;
     if (HEAP.size > HEAP.heapLimit) {
       oversize = TRUE;
@@ -906,11 +915,11 @@ void attribute_hidden doGc2(unsigned bkt) {
 #ifdef GCPROF
     printf("Growing heap limit to %f\n", HEAP.heapLimit/1024.0/1024.0);
 #endif
-  } else if (heapPressure < HEAP_SIZE_MAX_SLACK && fullCollection) {
+  } else if (heapPressure < HEAP_SIZE_MAX_SLACK && allow_grow) {
     HEAP.heapLimit *= HEAP_SHRINK_RATE;
   }
 
-  if (pagePressure > page_slack_needed && fullCollection) {
+  if (pagePressure > page_slack_needed && allow_grow) {
     HEAP.page_limit *= PAGES_GROW_RATE;
 #ifdef GCPROF
     printf("Growing page limit to %d\n", HEAP.page_limit);
@@ -957,6 +966,7 @@ void attribute_hidden doGc2(unsigned bkt) {
 
 
   gc_count++;
+  last_full_collection++;
 }
 
 void attribute_hidden doGc(unsigned bkt, R_size_t size_needed)
