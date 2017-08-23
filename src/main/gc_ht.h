@@ -5,13 +5,11 @@ struct Page;
 
 enum PageState { FRESH, SPLIT, MARKED, SWEEPING, SWEPT, FULL };
 
-#pragma pack(push, 1)
 typedef struct PageHashtableEntry {
   struct Page* page;
   uint8_t last_mark;
   uint8_t state;
 } PageHashtableEntry;
-#pragma pack(pop)
 
 typedef struct PageHashtable {
   size_t size;
@@ -62,64 +60,56 @@ FORCE_INLINE uint32_t PageHashtable_h(void* k) {
 }
 
 Rboolean PageHashtable_add(PageHashtable* ht, PageHashtableEntry e) {
-  long key = PageHashtable_h(e.page);
-  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
-  long el = 0;
-  while (ht->data[idx + el].page != NULL && el < HASH_BUCKET_SIZE) {
-    if (ht->data[idx + el].page == e.page) {
-      R_Suicide("ht err 3");
+  uint32_t key = PageHashtable_h(e.page);
+  uint32_t idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+  uint32_t end = idx + HASH_BUCKET_SIZE;
+  for (;idx < end; ++idx) {
+    CHECK (ht->data[idx].page != e.page);
+    if (ht->data[idx].page == NULL) {
+      ht->data[idx] = e;
+      return TRUE;
     }
-    ++el;
   }
-  if (el == HASH_BUCKET_SIZE) {
-    return FALSE;
-  }
-  CHECK(ht->data[idx + el].page == NULL);
-  CHECK(el >= 0 && el < HASH_BUCKET_SIZE);
-  ht->data[idx + el] = e;
-  return TRUE;
+  return FALSE;
 }
 
 PageHashtableEntry* PageHashtable_get(PageHashtable* ht, struct Page* p) {
-  long key = PageHashtable_h(p);
-  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
-  long el = 0;
-  while (el < HASH_BUCKET_SIZE && ht->data[idx + el].page != NULL) {
-    if (ht->data[idx + el].page == p)
-      return &ht->data[idx + el];
-    ++el;
-  }
+  CHECK(HASH_BUCKET_SIZE == 8);
+
+  uint32_t key = PageHashtable_h(p);
+  uint32_t idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+
+       if (ht->data[idx  ].page == p) return &ht->data[idx  ];
+  else if (ht->data[idx+1].page == p) return &ht->data[idx+1];
+  else if (ht->data[idx+2].page == p) return &ht->data[idx+2];
+  else if (ht->data[idx+3].page == p) return &ht->data[idx+3];
+  else if (ht->data[idx+4].page == p) return &ht->data[idx+4];
+  else if (ht->data[idx+5].page == p) return &ht->data[idx+5];
+  else if (ht->data[idx+6].page == p) return &ht->data[idx+6];
+  else if (ht->data[idx+7].page == p) return &ht->data[idx+7];
+
+  CHECK(0);
   return NULL;
 }
 
-void PageHashtable_remove_el(PageHashtable* ht, size_t pos) {
-  do {
-    ht->data[pos] = ht->data[pos + 1];
-    ++pos;
-  } while (pos % HASH_BUCKET_SIZE != 0);
-  ht->data[pos - 1].page = NULL;
-}
-
 void PageHashtable_remove(PageHashtable* ht, void* p) {
-  long key = PageHashtable_h(p);
-  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
-  long el = 0;
-  while (el < HASH_BUCKET_SIZE) {
-    if (ht->data[idx + el].page == p) {
-      PageHashtable_remove_el(ht, idx + el);
+  uint32_t key = PageHashtable_h(p);
+  uint32_t idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+  uint32_t end = idx + HASH_BUCKET_SIZE;
+  for (;idx < end; ++idx) {
+    if (ht->data[idx].page == p) {
+      ht->data[idx].page = NULL;
       return;
     }
-    el++;
   }
   CHECK(0);
 }
 
-#pragma pack(push, 1)
 typedef struct ObjHashtableEntry {
   SEXP entry;
   uint8_t mark;
+  size_t size;
 } ObjHashtableEntry;
-#pragma pack(pop)
 
 typedef struct ObjHashtable {
   size_t size;
@@ -159,7 +149,7 @@ void ObjHashtable_grow(ObjHashtable** ht) {
 }
 
 FORCE_INLINE uint32_t ObjHashtable_h(void* k) {
-  uint32_t a = (uintptr_t)k >> 2;
+  uint32_t a = (uintptr_t)k >> 1;
   a = (a ^ 61) ^ (a >> 16);
   a = a + (a << 3);
   a = a ^ (a >> 4);
@@ -168,69 +158,60 @@ FORCE_INLINE uint32_t ObjHashtable_h(void* k) {
   return a;
 }
 
-Rboolean ObjHashtable_add(ObjHashtable* ht, ObjHashtableEntry e) {
-  long key = ObjHashtable_h(e.entry);
-  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
-  long el = 0;
-  while (ht->data[idx + el].entry != NULL && el < HASH_BUCKET_SIZE) {
-    if (ht->data[idx + el].entry == e.entry) {
-      R_Suicide("ht err 3");
-    }
-    ++el;
-  }
-  if (el == HASH_BUCKET_SIZE) {
-    return FALSE;
-  }
-  CHECK(ht->data[idx + el].entry == NULL);
-  CHECK(el >= 0 && el < HASH_BUCKET_SIZE);
-  ht->data[idx + el] = e;
+FORCE_INLINE Rboolean ObjHashtable_add(ObjHashtable* ht, ObjHashtableEntry e) {
+  CHECK(HASH_BUCKET_SIZE == 8);
+  uint32_t key = ObjHashtable_h(e.entry);
+  uint32_t idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+       if (ht->data[idx  ].entry == NULL) ht->data[idx  ] = e;
+  else if (ht->data[idx+1].entry == NULL) ht->data[idx+1] = e;
+  else if (ht->data[idx+2].entry == NULL) ht->data[idx+2] = e;
+  else if (ht->data[idx+3].entry == NULL) ht->data[idx+3] = e;
+  else if (ht->data[idx+4].entry == NULL) ht->data[idx+4] = e;
+  else if (ht->data[idx+5].entry == NULL) ht->data[idx+5] = e;
+  else if (ht->data[idx+6].entry == NULL) ht->data[idx+6] = e;
+  else if (ht->data[idx+7].entry == NULL) ht->data[idx+7] = e;
+  else return FALSE;
   return TRUE;
 }
 
 FORCE_INLINE ObjHashtableEntry* ObjHashtable_get(ObjHashtable* ht, SEXP p) {
-  long key = ObjHashtable_h(p);
-  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
-  long el = 0;
-  while (el < HASH_BUCKET_SIZE && ht->data[idx + el].entry != NULL) {
-    if (ht->data[idx + el].entry == p)
-      return &ht->data[idx + el];
-    ++el;
-  }
+  CHECK(HASH_BUCKET_SIZE == 8);
+  uint32_t key = ObjHashtable_h(p);
+  uint32_t idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+       if (ht->data[idx  ].entry == p) return &ht->data[idx  ];
+  else if (ht->data[idx+1].entry == p) return &ht->data[idx+1];
+  else if (ht->data[idx+2].entry == p) return &ht->data[idx+2];
+  else if (ht->data[idx+3].entry == p) return &ht->data[idx+3];
+  else if (ht->data[idx+4].entry == p) return &ht->data[idx+4];
+  else if (ht->data[idx+5].entry == p) return &ht->data[idx+5];
+  else if (ht->data[idx+6].entry == p) return &ht->data[idx+6];
+  else if (ht->data[idx+7].entry == p) return &ht->data[idx+7];
+
   R_Suicide("ht expt 6");
   return NULL;
 }
 
 
 Rboolean ObjHashtable_exists(ObjHashtable* ht, SEXP p) {
-  long key = ObjHashtable_h(p);
-  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
-  long el = 0;
-  while (el < HASH_BUCKET_SIZE && ht->data[idx + el].entry != NULL) {
-    if (ht->data[idx + el].entry == p)
+  uint32_t key = ObjHashtable_h(p);
+  uint32_t idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+  uint32_t end = idx + HASH_BUCKET_SIZE;
+  for (;idx < end; ++idx) {
+    if (ht->data[idx].entry == p)
       return TRUE;
-    ++el;
   }
   return FALSE;
 }
 
-void ObjHashtable_remove_el(ObjHashtable* ht, size_t pos) {
-  do {
-    ht->data[pos] = ht->data[pos + 1];
-    ++pos;
-  } while (pos % HASH_BUCKET_SIZE != 0);
-  ht->data[pos - 1].entry = NULL;
-}
-
 void ObjHashtable_remove(ObjHashtable* ht, SEXP p) {
-  long key = ObjHashtable_h(p);
-  long idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
-  long el = 0;
-  while (el < HASH_BUCKET_SIZE) {
-    if (ht->data[idx + el].entry == p) {
-      ObjHashtable_remove_el(ht, idx + el);
+  uint32_t key = ObjHashtable_h(p);
+  uint32_t idx = HASH_BUCKET_SIZE * (key & (ht->size - 1));
+  uint32_t end = idx + HASH_BUCKET_SIZE;
+  for (;idx < end; ++idx) {
+    if (ht->data[idx].entry == p) {
+      ht->data[idx].entry = NULL;
       return;
     }
-    el++;
   }
   CHECK(0);
 }

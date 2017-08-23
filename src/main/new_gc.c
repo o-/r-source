@@ -94,9 +94,7 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
 #define MS_TRIGGER 2000
 #define INITIAL_MS_SIZE 4000
 #define GC_TIME_TRESHOLD 0.17
-#define GC_TIME_PRESSURE 0.9
-
-size_t last_full_collection = 0;
+#define GC_TIME_PRESSURE 0.95
 
 typedef struct Page {
   uint8_t mark[MAX_IDX];
@@ -229,7 +227,7 @@ void* allocBigObj(size_t sexp_sz) {
 
   HEAP.size += sz;
 
-  ObjHashtableEntry e = {data, UNMARKED};
+  ObjHashtableEntry e = {data, UNMARKED, sz};
   while (!ObjHashtable_add(HEAP.bigObjectsHt, e))
     ObjHashtable_grow(&HEAP.bigObjectsHt);
 
@@ -833,7 +831,6 @@ void attribute_hidden doGc2(unsigned bkt) {
 
   // clear mark bits
   if (fullCollection) {
-    last_full_collection = 0;
     // Normally we do not trigger the write barrier if we are doing a full
     // GC anyway. But if the full GC is triggered by some external request
     // (e.g. calling gc() from R) then there might still be some things left
@@ -962,7 +959,6 @@ void attribute_hidden doGc2(unsigned bkt) {
 
 
   gc_count++;
-  last_full_collection++;
 }
 
 void attribute_hidden doGc(unsigned bkt, R_size_t size_needed)
@@ -1114,8 +1110,7 @@ void free_unused_memory() {
 #ifdef CONSERVATIVE_STACK_SCAN
           PageHashtable_remove(HEAP.pagesHt, e->page);
 #endif
-          PageHashtable_remove_el(bucket->pagesHt, i);
-          --i;
+          e->page = NULL;
         } else {
           if (e->page == bucket->to_bump) {
             e->state = SPLIT;
@@ -1139,16 +1134,10 @@ void free_unused_memory() {
   for (int i = 0; i < ht_size; ++i) {
     ObjHashtableEntry* e = &HEAP.bigObjectsHt->data[i];
     if (e->entry && e->mark < M) {
-      size_t sz = getVecSizeInVEC(e->entry) * sizeof(VECREC) + sizeof(VECTOR_SEXPREC);
-#ifdef LONG_VECTOR_SUPPORT
-      if (XLENGTH(e->entry) > R_SHORT_LEN_MAX)
-        sz += sizeof(R_long_vec_hdr_t);
-#endif
-      HEAP.size -= sz;
-      ON_DEBUG(memset(e->entry, 0xd0, sz));
+      HEAP.size -= e->size;
+      ON_DEBUG(memset(e->entry, 0xd0, e->size));
       free(e->entry);
-      ObjHashtable_remove_el(HEAP.bigObjectsHt, i);
-      --i;
+      e->entry = NULL;
     }
   }
 }
