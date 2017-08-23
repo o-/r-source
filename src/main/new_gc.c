@@ -86,17 +86,15 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
 #define HEAP_GROW_RATE 1.2
 #define PAGES_GROW_RATE 1.3
 #define HEAP_SHRINK_RATE 0.8
-#define HEAP_SIZE_SLACK 0.8
+#define HEAP_SIZE_SLACK 0.82
 #define HEAP_SIZE_MAX_SLACK 0.35
-#define HEAP_PAGES_SLACK 0.83
+#define HEAP_PAGES_SLACK 0.8
 #define FULL_COLLECTION_TRIGGER 0.9
 #define WRITE_BARRIER_MS_TRIGGER 2000
 #define MS_TRIGGER 2000
 #define INITIAL_MS_SIZE 4000
-#define GC_TIME_TRESHOLD 0.14
-#define GC_TIME_PRESSURE 0.97
-#define GROW_TRIGGER_MINOR_COLLECTIONS 4
-#define GROW_TRIGGER_MINOR_SLACK 0.91
+#define GC_TIME_TRESHOLD 0.17
+#define GC_TIME_PRESSURE 0.9
 
 size_t last_full_collection = 0;
 
@@ -900,10 +898,6 @@ void attribute_hidden doGc2(unsigned bkt) {
   if (gc_alloc_ratio > GC_TIME_TRESHOLD) {
     heap_slack_needed *= GC_TIME_PRESSURE;
     page_slack_needed *= GC_TIME_PRESSURE;
-
-    allow_grow = allow_grow ||
-      (last_full_collection > GROW_TRIGGER_MINOR_COLLECTIONS &&
-       heapPressure > GROW_TRIGGER_MINOR_SLACK);
   }
 
   Rboolean oversize = FALSE;
