@@ -80,7 +80,7 @@ size_t BUCKET_SIZE[NUM_BUCKETS] = {
   32, 40, 48, 56, 64, 72, 80, 88, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448};
 
 #define INITIAL_PAGE_LIMIT 500
-#define FREE_PAGES_SLACK 50
+#define FREE_PAGES_SLACK 40
 #define INITIAL_HEAP_LIMIT (10 * 1024 * 1024)
 #define PAGE_FULL_TRESHOLD 0.01
 #define HEAP_GROW_RATE 1.2
@@ -171,6 +171,8 @@ size_t TSpos = 0;
 size_t TSsize = 0;
 #endif
 
+static R_size_t GLOBAL_HEAP_LIMIT;
+
 int heapIsInitialized = 0;
 void attribute_hidden new_gc_initHeap() {
   for (size_t i = 0; i < NUM_BUCKETS; ++i) {
@@ -209,6 +211,12 @@ void attribute_hidden new_gc_initHeap() {
 #endif
   heapIsInitialized = 1;
   clock_gettime(CLOCK_MONOTONIC, &last_gc);
+
+  char* arg = getenv("GLOBAL_HEAP_LIMIT");
+  if (arg)
+    GLOBAL_HEAP_LIMIT = atoi(arg);
+  else
+    GLOBAL_HEAP_LIMIT = 0;
 }
 
 SEXP alloc(size_t sz);
@@ -218,6 +226,9 @@ void* allocBigObj(size_t sexp_sz) {
 
   if (gc_pending || HEAP.size + sz > HEAP.heapLimit)
     doGc(NUM_BUCKETS, sz);
+
+  if (HEAP.size + sz > HEAP.heapLimit)
+    R_Suicide("no more memory");
 
   SEXP data = (SEXP)malloc(sz);
   if (data == NULL)
@@ -401,7 +412,10 @@ void* slowAllocInBucket(unsigned bkt) {
   }
 
   if (HEAP.page_limit <= bucket->num_pages) {
-    R_Suicide("fatal, run out of space");
+    R_Suicide("fatal, above page_limit");
+  }
+  if (HEAP.size + PAGE_SIZE > HEAP.heapLimit) {
+    R_Suicide("no more memory for a full page");
   }
 
   growBucket(bkt);
@@ -923,6 +937,15 @@ void attribute_hidden doGc2(unsigned bkt) {
   R_VSize = HEAP.heapLimit;
   if (HEAP.heapLimit > R_MaxVSize + R_MaxNSize * sizeof(SEXPREC))
     HEAP.heapLimit = R_MaxVSize + R_MaxNSize * sizeof(SEXPREC);
+
+  size_t overhead =
+    MSsize*sizeof(SEXP) +
+    HEAP.num_pages * sizeof(Page) +
+    HEAP.sizeBucket->pagesHt->size * HASH_BUCKET_SIZE * sizeof(PageHashtableEntry) * NUM_BUCKETS +
+    HEAP.bigObjectsHt->size * HASH_BUCKET_SIZE * sizeof(ObjHashtableEntry);
+
+  if (HEAP.heapLimit + overhead > GLOBAL_HEAP_LIMIT && GLOBAL_HEAP_LIMIT != 0)
+    HEAP.heapLimit = GLOBAL_HEAP_LIMIT - overhead;
 
 #ifdef GCPROF
   clock_gettime(CLOCK_MONOTONIC, &time4);
