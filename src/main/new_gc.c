@@ -823,7 +823,7 @@ void clear_marks();
 void processStackNodes();
 
 
-void attribute_hidden doGc2(unsigned bkt) {
+void attribute_hidden doGc2(unsigned bkt, size_t needed) {
 
   struct timespec gc_start;
   clock_gettime(CLOCK_MONOTONIC, &gc_start);
@@ -914,16 +914,17 @@ void attribute_hidden doGc2(unsigned bkt) {
   Rboolean oversize = FALSE;
   if (heapPressure > heap_slack_needed && allow_grow) {
     HEAP.heapLimit *= HEAP_GROW_RATE;
-    if (HEAP.size > HEAP.heapLimit) {
-      oversize = TRUE;
-      HEAP.heapLimit = HEAP.size + HEAP.size * (1-HEAP_SIZE_SLACK);
-    }
 
 #ifdef GCPROF
     printf("Growing heap limit to %f\n", HEAP.heapLimit/1024.0/1024.0);
 #endif
   } else if (heapPressure < HEAP_SIZE_MAX_SLACK && allow_grow) {
     HEAP.heapLimit *= HEAP_SHRINK_RATE;
+  }
+
+  if (HEAP.size + needed > HEAP.heapLimit) {
+    oversize = TRUE;
+    HEAP.heapLimit = HEAP.size + (needed * 1.2);
   }
 
   if (pagePressure > page_slack_needed && allow_grow) {
@@ -1019,7 +1020,7 @@ void attribute_hidden doGc(unsigned bkt, R_size_t size_needed)
     BEGIN_SUSPEND_INTERRUPTS {
 	R_in_gc = TRUE;
 	gc_start_timing();
-	doGc2(bkt);
+	doGc2(bkt, size_needed);
 	gc_end_timing();
 	R_in_gc = FALSE;
     } END_SUSPEND_INTERRUPTS;
