@@ -65,19 +65,18 @@ Rboolean fullCollection = FALSE;
 
 #define CONS_BUCKET 0
 #define ENV_BUCKET 1
-#define PROM_BUCKET 2
-#define GENERIC_SEXP_BUCKET 3
-#define INT_BUCKET 4
-#define REAL_BUCKET 5
-#define LGL_BUCKET 6
+#define PROM_BUCKET 1
+#define GENERIC_SEXP_BUCKET 2
+#define SCALAR_BUCKET 3
 // GCC f* up of more than 25!
-#define NUM_BUCKETS 25
-#define FIRST_GENERIC_BUCKET 7
+#define NUM_BUCKETS 22
+#define FIRST_GENERIC_BUCKET 4
 
 size_t BUCKET_SIZE[NUM_BUCKETS] = {
-  40, 40, 40, 40,
-  32, 32, 32,
+  40, 40, 40,
+  32,
   32, 40, 48, 56, 64, 72, 80, 88, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448};
+#define MAX_BUCKET_SIZE 448
 
 #define INITIAL_PAGE_LIMIT 500
 #define FREE_PAGES_SLACK 40
@@ -173,6 +172,8 @@ size_t TSsize = 0;
 
 static R_size_t GLOBAL_HEAP_LIMIT;
 
+static uint8_t bucketLookupTable[MAX_BUCKET_SIZE+1];
+
 int heapIsInitialized = 0;
 void attribute_hidden new_gc_initHeap() {
   for (size_t i = 0; i < NUM_BUCKETS; ++i) {
@@ -217,6 +218,13 @@ void attribute_hidden new_gc_initHeap() {
     GLOBAL_HEAP_LIMIT = atoi(arg);
   else
     GLOBAL_HEAP_LIMIT = 0;
+
+  unsigned bkt = FIRST_GENERIC_BUCKET;
+  for (size_t i = 0; i <= MAX_BUCKET_SIZE; ++i) {
+    if (BUCKET_SIZE[bkt] < i)
+      bkt++;
+    bucketLookupTable[i] = bkt;
+  }
 }
 
 SEXP alloc(size_t sz);
@@ -442,6 +450,7 @@ void attribute_hidden finishSweep(SizeBucket* bucket, Page* page) {
 
 void* slowSweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
   size_t sz = BUCKET_SIZE[bkt];
+  uint8_t M = THE_MARK;
 
   // Lazy sweeping
   while (bucket->to_sweep != NULL) {
@@ -452,7 +461,7 @@ void* slowSweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
       size_t i = PTR2IDX(res);
       CHECK(i < MAX_IDX);
       finger += sz;
-      if (page->mark[i] < THE_MARK) {
+      if (page->mark[i] != M) {
         ON_DEBUG(memset(res, 0xd5, sz));
 #ifndef GCSTRESS
         page->sweep_finger = finger;
@@ -471,6 +480,7 @@ void* slowSweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
 
 FORCE_INLINE void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
   size_t sz = BUCKET_SIZE[bkt];
+  uint8_t M = THE_MARK;
 
   if (bucket->to_sweep) {
     Page* page = bucket->to_sweep;
@@ -480,7 +490,7 @@ FORCE_INLINE void* sweepAllocInBucket(unsigned bkt, SizeBucket* bucket) {
       size_t i = PTR2IDX(res);
       CHECK(i < MAX_IDX);
       finger += sz;
-      if (page->mark[i] < THE_MARK) {
+      if (page->mark[i] != M) {
         ON_DEBUG(memset(res, 0xd5, sz));
 #ifndef GCSTRESS
         page->sweep_finger = finger;
@@ -520,10 +530,8 @@ FORCE_INLINE void* allocInBucket(unsigned bkt) {
 }
 
 SEXP attribute_hidden alloc(size_t sz) {
-  unsigned bkt = FIRST_GENERIC_BUCKET;
-  while (bkt < NUM_BUCKETS && BUCKET_SIZE[bkt] < sz)
-    ++bkt;
-  if (bkt < NUM_BUCKETS) {
+  if (sz <= MAX_BUCKET_SIZE) {
+    unsigned bkt = bucketLookupTable[sz];
     SEXP res = (SEXP)allocInBucket(bkt);
     // printf("allo %p for %d in %d\n", res, sz, BUCKET_SIZE[bkt]);
     CHECK(!ISMARKED(res));
@@ -546,13 +554,9 @@ SEXP attribute_hidden new_gc_allocVector3(SEXPTYPE type,
     SEXP s;
     switch (type) {
       case REALSXP:
-        s = allocInBucket(REAL_BUCKET);
-        break;
       case INTSXP:
-        s = allocInBucket(INT_BUCKET);
-        break;
       case LGLSXP:
-        s = allocInBucket(LGL_BUCKET);
+        s = allocInBucket(SCALAR_BUCKET);
         break;
       default:
         return new_gc_allocVector3_slow(type, length);
@@ -805,15 +809,15 @@ void attribute_hidden updatePageMark(Page* p) {
     Page* _p_ = PTR2PAGE((s));                                         \
     CHECK((uintptr_t)(s) < _p_->alloc_finger);                         \
     size_t _i_ = PTR2IDX((s));                                         \
-    if (_p_->mark[_i_] < THE_MARK) {                                   \
-      if (_p_->last_mark < THE_MARK)                                   \
+    if (_p_->mark[_i_] != THE_MARK) {                                  \
+      if (_p_->last_mark != THE_MARK)                                  \
         updatePageMark(_p_);                                           \
       _p_->mark[_i_] = THE_MARK;                                       \
       { what; }                                                        \
     }                                                                  \
   } else {                                                             \
     ObjHashtableEntry* e = ObjHashtable_get(HEAP.bigObjectsHt, s);     \
-    if ((s)->sxpinfo.old == 0 || e->mark < THE_MARK) {                 \
+    if ((s)->sxpinfo.old == 0 || e->mark != THE_MARK) {                \
       e->mark = THE_MARK;                                              \
       { what; }                                                        \
     }                                                                  \
@@ -1419,14 +1423,14 @@ FORCE_INLINE Rboolean isNewValidSexp(void* ptr) {
     if ((e->state == SWEEPING || e->state == SWEPT) && pos < page->sweep_finger) {
       if (fullCollection)
         return TRUE;
-      return page->mark[PTR2IDX(ptr)] < THE_MARK;
+      return page->mark[PTR2IDX(ptr)] != THE_MARK;
     }
 
     // Not yet swept space
     return fullCollection && page->mark[PTR2IDX(ptr)] == THE_MARK;
   }
   return ObjHashtable_exists(HEAP.bigObjectsHt, ptr) &&
-      (fullCollection || PTR2BIG(ptr)->mark < THE_MARK);
+      (fullCollection || PTR2BIG(ptr)->mark != THE_MARK);
 }
 
 
